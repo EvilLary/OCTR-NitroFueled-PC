@@ -202,7 +202,8 @@ def main():
         shutil.copy2(script, folder / 'scripts')
     for tool in ('gen_import_names.py', 'merge_update.py'):
         shutil.copy2(ROOT / 'tools' / tool, folder / 'tools')
-    shutil.copy2(ROOT / 'patches' / 'CrashTeamRacing.xml', folder / 'patches')
+    for patch in (ROOT / 'patches').glob('*.xml'):
+        shutil.copy2(patch, folder / 'patches')
     if (ROOT / 'out' / 'aerolib.inl').is_file():
         shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in

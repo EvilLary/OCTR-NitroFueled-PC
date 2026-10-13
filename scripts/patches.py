@@ -17,6 +17,7 @@ lists it under "enabled", or when its file marks it isEnabled and patches.json d
 """
 import argparse
 import json
+import os
 import re
 import struct
 import sys
@@ -31,7 +32,8 @@ APP_VERSION='01.21'
 # 60 FPS Unlock and Disable Motion Blur by illusion, the 1080p Pro resolution patch by TroyWarez.
 GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_no_motion_blur':'CrashTeamRacing.xml/Disable Motion Blur',
-                 'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)'}
+                 'patch_pro_1080p':'CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)',
+                 'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
 
 
 # bbport.ini render_res: the scene size the game renders in PS4 Pro mode (run.py turns the Pro
@@ -207,6 +209,8 @@ def external_selection(found, config, ini=None):
     enabled,disabled=set(settings.get('enabled',[])),set(settings.get('disabled',[]))
     for key,patch in GAME_PATCH_KEYS.items():
         if (ini or {}).get(key)=='1': enabled.add(patch); disabled.discard(patch)
+    if os.environ.get('BB_ONLINE')=='1' or (ini or {}).get('online')=='1':
+        enabled.add('CrashTeamRacingOnline.xml/Online: custom Demonware key')
     # The 1080p Pro patch follows render_res (Settings > Internal resolution, the in-game menu).
     pro_1080p=GAME_PATCH_KEYS['patch_pro_1080p']
     # With render_res the Pro mode follows it (run.py): 1080p runs the base PS4 path, so the

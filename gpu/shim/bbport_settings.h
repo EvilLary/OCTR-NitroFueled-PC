@@ -109,6 +109,7 @@ struct Values {
     /// SacredFire: exclusive fullscreen on the game's display (BB_DISPLAY). Applies at once;
     /// BB_FULLSCREEN=1 at start. Saved to bbport.ini by the menu.
     std::atomic<bool> fullscreen{false};
+    std::atomic<bool> borderless{false};
     /// The settings menu's position (fraction of the screen), -1 until it is moved.
     std::atomic<float> menu_x{-1.0f}, menu_y{-1.0f};
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.

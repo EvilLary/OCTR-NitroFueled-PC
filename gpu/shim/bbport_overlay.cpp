@@ -727,6 +727,9 @@ void Menu() {
                                   "Applies at once; BB_FULLSCREEN=1 at start.",
                                   "Полный экран на дисплее игры (BB_DISPLAY). "
                                   "Сразу; BB_FULLSCREEN=1 при запуске."));
+        Checkbox(BbSettings::MenuText("Borderless window", "Без рамок"), s.borderless);
+        Hint(BbSettings::MenuText("Remove window borders in windowed mode.",
+                                  "Убрать рамку окна в оконном режиме."));
     }
 
     ImGui::SeparatorText(BbSettings::MenuText("Other", "Прочее"));

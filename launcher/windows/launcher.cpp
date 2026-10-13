@@ -566,6 +566,9 @@ struct App {
 
     Ini launcher;  // launcher.ini
     Ini game;      // bbport.ini
+    char online_server_buf[128] = "octr.ryu7w7.xyz";
+    char online_name_buf[32] = "RyuPC";
+    char online_friends_buf[512] = "";
 
     // Game folders.
     fs::path game_dir, base_dir, update_dir;
@@ -636,6 +639,23 @@ void SaveGameIni() {
     if (!g_app.game.Save(GameIni(), "# bbport settings (in-game menu: Insert / L3+R3)")) {
         g_app.notice = T("No se pudo guardar bbport.ini.", "Could not save bbport.ini.");
     }
+}
+
+void SyncOnlineBuffers() {
+    App& a = g_app;
+    std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
+    if (srv.empty() || srv == "127.0.0.1") {
+        srv = "octr.ryu7w7.xyz";
+        a.game.Set("online_server", srv);
+    }
+    std::string nick = a.game.Get("online_name", a.game.Get("user_name", "RyuPC"));
+    std::string friends = a.game.Get("online_friends", "");
+    std::strncpy(a.online_server_buf, srv.c_str(), sizeof(a.online_server_buf) - 1);
+    a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+    std::strncpy(a.online_name_buf, nick.c_str(), sizeof(a.online_name_buf) - 1);
+    a.online_name_buf[sizeof(a.online_name_buf) - 1] = '\0';
+    std::strncpy(a.online_friends_buf, friends.c_str(), sizeof(a.online_friends_buf) - 1);
+    a.online_friends_buf[sizeof(a.online_friends_buf) - 1] = '\0';
 }
 
 void AddLog(const std::string& line) {
@@ -878,6 +898,7 @@ void PollJobs() {
         a.game_running = false;
         a.show_exit = true;
         a.game.Load(GameIni());  // the in-game menu may have changed settings
+        SyncOnlineBuffers();
         a.saves_dirty = true;
         ShowWindow(a.hwnd, SW_RESTORE);
         SetForegroundWindow(a.hwnd);
@@ -1388,6 +1409,16 @@ void PlayTab() {
             ImGui::TextColored(kYellow, "%s", T("Comprobando el juego...", "Checking the game..."));
         } else if (a.game_ok) {
             ImGui::TextColored(kGreen, "%s %s", T("Listo:", "Ready:"), Describe(a.game_info).c_str());
+            if (a.game.Flag("online", true)) {
+                std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
+                if (srv.empty() || srv == "127.0.0.1") srv = "octr.ryu7w7.xyz";
+                const std::string nick = a.game.Get("online_name", a.game.Get("user_name", "RyuNET"));
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
+                                   T("Servidor", "Server"), srv.c_str(),
+                                   T("Apodo", "Nick"), nick.c_str());
+            } else {
+                ImGui::TextColored(kGrey, "[Online] %s", T("Modo offline (actívalo en Ajustes)", "Offline mode (enable in Settings)"));
+            }
         } else {
             ImGui::TextColored(kRed, "%s", T("Estos archivos no sirven:", "These files do not work:"));
             ImGui::PushTextWrapPos(0.0f);
@@ -1697,6 +1728,8 @@ void SettingsTab() {
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
     }
     GameFlag("fullscreen", T("Pantalla completa", "Fullscreen"), false);
+    GameFlag("borderless", T("Ventana sin bordes", "Borderless window"), false,
+             T("Quita los bordes de la ventana en modo ventana.", "Removes window borders in windowed mode."));
     GameFlag("show_fps", T("Contador de FPS en la esquina", "FPS counter in the corner"), false);
     {
         std::scoped_lock lock{a.mutex};
@@ -1771,6 +1804,49 @@ void SettingsTab() {
                  "francés y portugués de Brasil. El español de España no está en ella. Se aplica al pulsar Jugar.",
                  "The languages this build of the game has (CUSA13795, the Americas): English, Latin American "
                  "Spanish, French and Brazilian Portuguese. Spain's Spanish is not in it. Applied when you press Play."));
+
+    ImGui::SeparatorText(T("Online (RyuNET)", "Online (RyuNET)"));
+    {
+        GameFlag("online", T("Habilitar modo online", "Enable online mode"), true,
+                 T("Conecta a un servidor Demonware RyuNET para jugar online, emparejamiento, pit stop y marcadores.",
+                   "Connects to a RyuNET Demonware server for online play, matchmaking, pit stop, and leaderboards."));
+
+        const bool online_on = a.game.Flag("online", true);
+        ImGui::BeginDisabled(!online_on);
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20.0f);
+        if (ImGui::InputText(T("Servidor RyuNET (Server)", "RyuNET Server"), a.online_server_buf, sizeof(a.online_server_buf))) {
+            a.game.Set("online_server", a.online_server_buf);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            if (Trim(a.online_server_buf).empty()) {
+                std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
+                a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+                a.game.Set("online_server", a.online_server_buf);
+            }
+            SaveGameIni();
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T("Por defecto", "Default"))) {
+            std::strncpy(a.online_server_buf, "octr.ryu7w7.xyz", sizeof(a.online_server_buf) - 1);
+            a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+            a.game.Set("online_server", a.online_server_buf);
+            SaveGameIni();
+        }
+        HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz). Puerto HTTP opcional :8080.",
+                     "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz). Optional HTTP port :8080."));
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+        if (ImGui::InputText(T("Apodo (Nickname)", "Nickname"), a.online_name_buf, sizeof(a.online_name_buf))) {
+            a.game.Set("online_name", a.online_name_buf);
+            a.game.Set("user_name", a.online_name_buf);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+        HelpMarker(T("Nombre del jugador online (máx. 16 caracteres alfanuméricos, [A-Za-z0-9_-]).",
+                     "Online player name (max 16 characters, [A-Za-z0-9_-])."));
+
+        ImGui::EndDisabled();
+    }
 }
 
 void PatchesTab() {
@@ -2605,6 +2681,7 @@ void LoadState() {
     }
     a.launcher.Load(LauncherIni());
     a.game.Load(GameIni());
+    SyncOnlineBuffers();
     const std::string lang = a.launcher.Get("ui_language");
     g_spanish = lang.empty() ? PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH : lang == "es";
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
