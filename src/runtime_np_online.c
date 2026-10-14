@@ -123,13 +123,17 @@ static void sha256_online(const uint8_t *data, size_t len, uint8_t hash[32]) {
 uint64_t runtime_np_calculate_account_id(const char *name) {
     if (!name || !*name) return 0;
     uint64_t h = 14695981039346656037ULL;
-    for (const char *p = name; *p; p++) {
-        char c = (*p >= 'A' && *p <= 'Z') ? *p + 32 : *p;
+    char lower[128];
+    size_t i = 0;
+    for (; name[i] && i < sizeof(lower) - 1; i++) {
+        char c = (name[i] >= 'A' && name[i] <= 'Z') ? (char)(name[i] + 32) : name[i];
+        lower[i] = c;
         h ^= (uint8_t)c;
         h *= 1099511628211ULL;
     }
+    lower[i] = '\0';
     uint8_t sha[32];
-    sha256_online((const uint8_t *)name, strlen(name), sha);
+    sha256_online((const uint8_t *)lower, i, sha);
     uint64_t sha_u64 = 0;
     memcpy(&sha_u64, sha, sizeof(sha_u64));
     uint64_t mix = sha_u64 ^ h;
@@ -251,15 +255,19 @@ int32_t runtime_np_get_account_id(int32_t user, uint64_t *account_id) {
 }
 
 int32_t runtime_np_get_user_id_by_account_id(uint64_t account_id, int32_t *user_id) {
-    (void)account_id;
     if (!user_id) return NP_INVALID_ARGUMENT;
     if (!runtime_net_is_online()) {
         runtime_net_trace("sceNpGetUserIdByAccountId -> NP_SIGNED_OUT");
         return NP_SIGNED_OUT;
     }
-    *user_id = 1;
-    runtime_net_trace("sceNpGetUserIdByAccountId -> user_id=1");
-    return ORBIS_OK;
+    if (account_id == get_online_account_id()) {
+        *user_id = 1;
+        runtime_net_trace("sceNpGetUserIdByAccountId(acc=%llu) -> user_id=1 (local player)", (unsigned long long)account_id);
+        return ORBIS_OK;
+    }
+    *user_id = -1;
+    runtime_net_trace("sceNpGetUserIdByAccountId(acc=%llu) -> remote friend (USER_NOT_FOUND)", (unsigned long long)account_id);
+    return (int32_t)0x80550005; /* SCE_NP_ERROR_USER_NOT_FOUND */
 }
 
 int32_t runtime_np_check_plus(int32_t req_id, const void *param, void *result_buf) {

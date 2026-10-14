@@ -15,8 +15,10 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <direct.h>
 #else
 #include <arpa/inet.h>
+#include <sys/stat.h>
 #endif
 
 #define USER_ID 1
@@ -253,6 +255,7 @@ typedef struct {
 typedef struct {
     int64_t id;
     int in_use;
+    int32_t method;
     char group[64];
     char path[256];
     char *response;
@@ -264,9 +267,53 @@ typedef struct {
 static WebApiReq s_webapi_reqs[MAX_WEBAPI_REQS];
 static pthread_mutex_t s_webapi_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static void get_sessions_dir(char *out, size_t out_len) {
+    const char *sess_env = getenv("BB_SESSIONS_DIR");
+    if (sess_env && *sess_env) {
+        snprintf(out, out_len, "%s", sess_env);
+    } else {
+        snprintf(out, out_len, "sessions");
+    }
+#ifdef _WIN32
+    _mkdir(out);
+#else
+    mkdir(out, 0777);
+#endif
+}
+
+static void write_active_session(const char *session_id) {
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    const char *my_name = runtime_np_get_online_name();
+    if (!my_name || !*my_name) return;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.session", dir, my_name);
+    FILE *f = fopen(path, "w");
+    if (f) {
+        uint64_t acc_id = runtime_np_calculate_account_id(my_name);
+        fprintf(f, "sessionId=%s\naccountId=%llu\nonlineId=%s\ntime=%llu\n",
+                session_id, (unsigned long long)acc_id, my_name, (unsigned long long)time(NULL));
+        fclose(f);
+        runtime_net_trace("write_active_session: wrote session '%s' to '%s'", session_id, path);
+    }
+}
+
+static void remove_active_session(void) {
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    const char *my_name = runtime_np_get_online_name();
+    if (!my_name || !*my_name) return;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.session", dir, my_name);
+    remove(path);
+    runtime_net_trace("remove_active_session: removed '%s'", path);
+}
+
 static char *generate_friends_json(void) {
     const char *csv = runtime_np_get_friends_csv();
-    char buf[8192];
+    char buf[16384];
     size_t pos = 0;
     pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"friendList\":[");
 
@@ -276,7 +323,7 @@ static char *generate_friends_json(void) {
         strncpy(copy, csv, sizeof(copy) - 1);
         copy[sizeof(copy) - 1] = '\0';
         char *token = strtok(copy, ",");
-        while (token && pos + 512 < sizeof(buf)) {
+        while (token && pos + 1024 < sizeof(buf)) {
             while (*token == ' ' || *token == '\t') token++;
             char *end = token + strlen(token);
             while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
@@ -288,29 +335,457 @@ static char *generate_friends_json(void) {
                 }
                 pos += snprintf(buf + pos, sizeof(buf) - pos,
                     "{"
+                    "\"avatarUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
+                    "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
+                    "\"region\":\"US\","
+                    "\"isOfficiallyVerified\":false,"
                     "\"onlineId\":\"%s\","
                     "\"accountId\":\"%llu\","
-                    "\"avatarUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
-                    "\"plus\":1,"
-                    "\"friendRelation\":\"friend\","
-                    "\"isOfficiallyVerified\":false,"
-                    "\"personalDetail\":{\"displayName\":\"%s\"},"
+                    "\"user\":{\"accountId\":\"%llu\",\"onlineId\":\"%s\"},"
+                    "\"personalDetail\":{"
+                        "\"displayName\":\"%s\","
+                        "\"firstName\":\"%s\","
+                        "\"middleName\":\"\","
+                        "\"lastName\":\"\","
+                        "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\""
+                    "},"
                     "\"presence\":{"
                         "\"onlineStatus\":\"online\","
-                        "\"hasBroadcastData\":false,"
-                        "\"primaryPlatformInfo\":{\"onlineStatus\":\"online\",\"platform\":\"PS4\"},"
-                        "\"gameTitleInfo\":{\"titleId\":\"CUSA13795_00\",\"npTitleId\":\"CUSA13795_00\",\"titleName\":\"Crash Team Racing Nitro-Fueled\",\"format\":\"PS4\"},"
-                        "\"inContextPresence\":{\"onlineStatus\":\"online\",\"gameStatus\":\"In Game\"}"
+                        "\"platform\":\"PS4\","
+                        "\"incontextInfoList\":[{"
+                            "\"platform\":\"PS4\","
+                            "\"onlineStatus\":\"online\","
+                            "\"gameStatus\":\"In Game\","
+                            "\"gameData\":\"\","
+                            "\"gameTitleInfo\":{"
+                                "\"npTitleId\":\"CUSA13795_00\","
+                                "\"titleName\":\"Crash Team Racing Nitro-Fueled\""
+                            "}"
+                        "}]"
                     "}"
                     "}",
-                    token, (unsigned long long)acc_id, token);
+                    token, (unsigned long long)acc_id, (unsigned long long)acc_id, token, token, token);
                 count++;
             }
             token = strtok(NULL, ",");
         }
     }
 
-    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"totalResults\":%d,\"offset\":0,\"limit\":500,\"start\":0,\"size\":%d}", count, count);
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"totalResults\":%d,\"size\":%d,\"offset\":0,\"limit\":500,\"start\":0}", count, count);
+    runtime_net_trace("generate_friends_json: returning %d friend(s)", count);
+    return strdup(buf);
+}
+
+static char *generate_profiles_json(const char *path) {
+    (void)path;
+    const char *csv = runtime_np_get_friends_csv();
+    const char *my_name = runtime_np_get_online_name();
+
+    char buf[16384];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"profiles\":[");
+
+    int count = 0;
+
+    /* Include local player */
+    if (my_name && *my_name) {
+        uint64_t my_acc = runtime_np_calculate_account_id(my_name);
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            "{"
+            "\"accountId\":\"%llu\","
+            "\"onlineId\":\"%s\","
+            "\"region\":\"US\","
+            "\"isOfficiallyVerified\":false,"
+            "\"user\":{\"accountId\":\"%llu\",\"onlineId\":\"%s\"},"
+            "\"relation\":\"me\","
+            "\"aboutMe\":\"Crash Team Racing Nitro-Fueled\","
+            "\"languagesUsed\":[\"en\"],"
+            "\"avatarUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
+            "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
+            "\"personalDetail\":{"
+                "\"displayName\":\"%s\","
+                "\"firstName\":\"%s\","
+                "\"middleName\":\"\","
+                "\"lastName\":\"\","
+                "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\""
+            "}"
+            "}",
+            (unsigned long long)my_acc, my_name, (unsigned long long)my_acc, my_name, my_name, my_name);
+        count++;
+    }
+
+    /* Include friends */
+    if (csv && *csv) {
+        char copy[1024];
+        strncpy(copy, csv, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        char *token = strtok(copy, ",");
+        while (token && pos + 1024 < sizeof(buf)) {
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token);
+            while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
+            *end = '\0';
+            if (*token && (!my_name || strcmp(token, my_name) != 0)) {
+                uint64_t acc_id = runtime_np_calculate_account_id(token);
+                if (count > 0) {
+                    pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                }
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "{"
+                    "\"accountId\":\"%llu\","
+                    "\"onlineId\":\"%s\","
+                    "\"region\":\"US\","
+                    "\"isOfficiallyVerified\":false,"
+                    "\"user\":{\"accountId\":\"%llu\",\"onlineId\":\"%s\"},"
+                    "\"relation\":\"friend\","
+                    "\"aboutMe\":\"Crash Team Racing Nitro-Fueled\","
+                    "\"languagesUsed\":[\"en\"],"
+                    "\"avatarUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
+                    "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\","
+                    "\"personalDetail\":{"
+                        "\"displayName\":\"%s\","
+                        "\"firstName\":\"%s\","
+                        "\"middleName\":\"\","
+                        "\"lastName\":\"\","
+                        "\"profilePictureUrl\":\"https://image.api.playstation.com/trophy/np/default_avatar.png\""
+                    "}"
+                    "}",
+                    (unsigned long long)acc_id, token, (unsigned long long)acc_id, token, token, token);
+                count++;
+            }
+            token = strtok(NULL, ",");
+        }
+    }
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"size\":%d,\"totalResults\":%d}", count, count);
+    runtime_net_trace("generate_profiles_json: returning %d profile(s)", count);
+    return strdup(buf);
+}
+
+static char *generate_friend_online_id_lists_json(void) {
+    const char *csv = runtime_np_get_friends_csv();
+    const char *my_name = runtime_np_get_online_name();
+    uint64_t my_acc = runtime_np_calculate_account_id(my_name);
+
+    char buf[8192];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+        "{\"friendOnlineIdLists\":[{\"user\":{\"accountId\":\"%llu\",\"onlineId\":\"%s\"},\"friendOnlineIdList\":[",
+        (unsigned long long)my_acc, (my_name && *my_name) ? my_name : "Player");
+
+    int count = 0;
+    if (csv && *csv) {
+        char copy[1024];
+        strncpy(copy, csv, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        char *token = strtok(copy, ",");
+        while (token && pos + 128 < sizeof(buf)) {
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token);
+            while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
+            *end = '\0';
+            if (*token) {
+                if (count > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                pos += snprintf(buf + pos, sizeof(buf) - pos, "\"%s\"", token);
+                count++;
+            }
+            token = strtok(NULL, ",");
+        }
+    }
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}]}");
+    return strdup(buf);
+}
+
+static char *generate_invitations_json(void) {
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    const char *csv = runtime_np_get_friends_csv();
+    const char *my_name = runtime_np_get_online_name();
+
+    char buf[8192];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"invitations\":[");
+
+    int count = 0;
+    if (csv && *csv) {
+        char copy[1024];
+        strncpy(copy, csv, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        char *token = strtok(copy, ",");
+        while (token && pos + 1024 < sizeof(buf)) {
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token);
+            while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
+            *end = '\0';
+            if (*token && (!my_name || strcmp(token, my_name) != 0)) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%s.session", dir, token);
+                FILE *f = fopen(path, "r");
+                if (f) {
+                    char sid[128] = {0};
+                    uint64_t acc_id = 0;
+                    char line[256];
+                    while (fgets(line, sizeof(line), f)) {
+                        if (strncmp(line, "sessionId=", 10) == 0) {
+                            char *nl = line + 10;
+                            while (*nl && *nl != '\r' && *nl != '\n') nl++;
+                            *nl = '\0';
+                            strncpy(sid, line + 10, sizeof(sid) - 1);
+                        } else if (strncmp(line, "accountId=", 10) == 0) {
+                            acc_id = strtoull(line + 10, NULL, 10);
+                        }
+                    }
+                    fclose(f);
+
+                    if (sid[0] == '\0') {
+                        snprintf(sid, sizeof(sid), "cusa13795-session-%s", token);
+                    }
+                    if (acc_id == 0) {
+                        acc_id = runtime_np_calculate_account_id(token);
+                    }
+
+                    if (count > 0) {
+                        pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                    }
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "{"
+                        "\"invitationId\":\"inv-%s\","
+                        "\"sessionId\":\"%s\","
+                        "\"receivedDate\":\"2026-10-14T00:00:00.000Z\","
+                        "\"updateDate\":\"2026-10-14T00:00:00.000Z\","
+                        "\"expired\":false,"
+                        "\"usedFlag\":false,"
+                        "\"fromUser\":{"
+                            "\"onlineId\":\"%s\","
+                            "\"accountId\":\"%llu\""
+                        "},"
+                        "\"session\":{"
+                            "\"sessionId\":\"%s\","
+                            "\"sessionName\":\"CTR Private Match\","
+                            "\"sessionLockFlag\":false"
+                        "}"
+                        "}",
+                        token, sid, token, (unsigned long long)acc_id, sid);
+                    count++;
+                }
+            }
+            token = strtok(NULL, ",");
+        }
+    }
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"size\":%d,\"totalResults\":%d}", count, count);
+    runtime_net_trace("generate_invitations_json: found %d invitation(s)", count);
+    return strdup(buf);
+}
+
+
+static char *generate_friend_sessions_json(void) {
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    const char *csv = runtime_np_get_friends_csv();
+    const char *my_name = runtime_np_get_online_name();
+
+    char buf[8192];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"sessions\":[");
+
+    int count = 0;
+    if (csv && *csv) {
+        char copy[1024];
+        strncpy(copy, csv, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        char *token = strtok(copy, ",");
+        while (token && pos + 1024 < sizeof(buf)) {
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token);
+            while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
+            *end = '\0';
+            if (*token && (!my_name || strcmp(token, my_name) != 0)) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%s.session", dir, token);
+                FILE *f = fopen(path, "r");
+                if (f) {
+                    char sid[128] = {0};
+                    uint64_t acc_id = 0;
+                    char line[256];
+                    while (fgets(line, sizeof(line), f)) {
+                        if (strncmp(line, "sessionId=", 10) == 0) {
+                            char *nl = line + 10;
+                            while (*nl && *nl != '\r' && *nl != '\n') nl++;
+                            *nl = '\0';
+                            strncpy(sid, line + 10, sizeof(sid) - 1);
+                        } else if (strncmp(line, "accountId=", 10) == 0) {
+                            acc_id = strtoull(line + 10, NULL, 10);
+                        }
+                    }
+                    fclose(f);
+
+                    if (sid[0] == '\0') {
+                        snprintf(sid, sizeof(sid), "cusa13795-session-%s", token);
+                    }
+                    if (acc_id == 0) {
+                        acc_id = runtime_np_calculate_account_id(token);
+                    }
+
+                    if (count > 0) {
+                        pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                    }
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "{"
+                        "\"sessionId\":\"%s\","
+                        "\"sessionName\":\"CTR Private Match\","
+                        "\"sessionCreateTimestamp\":\"2026-10-14T00:00:00.000Z\","
+                        "\"availablePlatforms\":[\"PS4\"],"
+                        "\"memberCount\":1,"
+                        "\"sessionLockFlag\":false,"
+                        "\"friends\":[{"
+                            "\"onlineId\":\"%s\","
+                            "\"accountId\":\"%llu\","
+                            "\"platform\":\"PS4\""
+                        "}]"
+                        "}",
+                        sid, token, (unsigned long long)acc_id);
+                    count++;
+                }
+            }
+            token = strtok(NULL, ",");
+        }
+    }
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"start\":0,\"size\":%d,\"totalResults\":%d}", count, count);
+    runtime_net_trace("generate_friend_sessions_json: found %d active session(s)", count);
+    return strdup(buf);
+}
+
+static char *generate_multiuser_sessions_json(void) {
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    const char *csv = runtime_np_get_friends_csv();
+    const char *my_name = runtime_np_get_online_name();
+
+    char buf[8192];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "{\"users\":[");
+
+    int count = 0;
+    if (csv && *csv) {
+        char copy[1024];
+        strncpy(copy, csv, sizeof(copy) - 1);
+        copy[sizeof(copy) - 1] = '\0';
+        char *token = strtok(copy, ",");
+        while (token && pos + 1024 < sizeof(buf)) {
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token);
+            while (end > token && (*(end - 1) == ' ' || *(end - 1) == '\t')) end--;
+            *end = '\0';
+            if (*token && (!my_name || strcmp(token, my_name) != 0)) {
+                char path[512];
+                snprintf(path, sizeof(path), "%s/%s.session", dir, token);
+                FILE *f = fopen(path, "r");
+                if (f) {
+                    char sid[128] = {0};
+                    uint64_t acc_id = 0;
+                    char line[256];
+                    while (fgets(line, sizeof(line), f)) {
+                        if (strncmp(line, "sessionId=", 10) == 0) {
+                            char *nl = line + 10;
+                            while (*nl && *nl != '\r' && *nl != '\n') nl++;
+                            *nl = '\0';
+                            strncpy(sid, line + 10, sizeof(sid) - 1);
+                        } else if (strncmp(line, "accountId=", 10) == 0) {
+                            acc_id = strtoull(line + 10, NULL, 10);
+                        }
+                    }
+                    fclose(f);
+
+                    if (sid[0] == '\0') {
+                        snprintf(sid, sizeof(sid), "cusa13795-session-%s", token);
+                    }
+                    if (acc_id == 0) {
+                        acc_id = runtime_np_calculate_account_id(token);
+                    }
+
+                    if (count > 0) {
+                        pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
+                    }
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "{"
+                        "\"accountId\":\"%llu\","
+                        "\"sessions\":[{"
+                            "\"sessionId\":\"%s\","
+                            "\"sessionName\":\"CTR Private Match\","
+                            "\"availablePlatforms\":[\"PS4\"],"
+                            "\"memberCount\":1,"
+                            "\"sessionLockFlag\":false,"
+                            "\"priority\":0,"
+                            "\"index\":0"
+                        "}]"
+                        "}",
+                        (unsigned long long)acc_id, sid);
+                    count++;
+                }
+            }
+            token = strtok(NULL, ",");
+        }
+    }
+
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    return strdup(buf);
+}
+
+static char *generate_session_info_json(const char *session_id) {
+    char buf[1024];
+    char host_name[64] = "Player";
+    uint64_t acc_id = 0;
+
+    if (session_id && strncmp(session_id, "cusa13795-session-", 18) == 0) {
+        strncpy(host_name, session_id + 18, sizeof(host_name) - 1);
+        host_name[sizeof(host_name) - 1] = '\0';
+    } else {
+        const char *my_name = runtime_np_get_online_name();
+        if (my_name && *my_name) {
+            strncpy(host_name, my_name, sizeof(host_name) - 1);
+            host_name[sizeof(host_name) - 1] = '\0';
+        }
+    }
+
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.session", dir, host_name);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "accountId=", 10) == 0) {
+                acc_id = strtoull(line + 10, NULL, 10);
+            }
+        }
+        fclose(f);
+    }
+    if (acc_id == 0) {
+        acc_id = runtime_np_calculate_account_id(host_name);
+    }
+
+    snprintf(buf, sizeof(buf),
+        "{"
+        "\"sessionId\":\"%s\","
+        "\"sessionName\":\"CTR Private Match\","
+        "\"sessionPrivacy\":\"public\","
+        "\"sessionType\":\"owner-bind\","
+        "\"sessionMaxUser\":8,"
+        "\"sessionStatus\":\"in_lobby\","
+        "\"sessionLockFlag\":false,"
+        "\"availablePlatforms\":[\"PS4\"],"
+        "\"members\":[{"
+            "\"accountId\":\"%llu\","
+            "\"onlineId\":\"%s\","
+            "\"platform\":\"PS4\""
+        "}]"
+        "}",
+        session_id ? session_id : "cusa13795-session",
+        (unsigned long long)acc_id, host_name);
     return strdup(buf);
 }
 
@@ -318,13 +793,14 @@ static ABI int32_t np_webapi_create_ctx(int32_t lib_ctx, void *online_id) { (voi
 static ABI int32_t np_webapi_create_ctx_a(int32_t lib_ctx, int32_t user_id) { (void)lib_ctx; (void)user_id; return new_id(); }
 static ABI int32_t np_webapi_create_req(int32_t user_ctx, const char *group, const char *path,
                                         int32_t method, const void *param, int64_t *req_id) {
-    (void)user_ctx; (void)method; (void)param;
+    (void)user_ctx; (void)param;
     int id = new_id();
     pthread_mutex_lock(&s_webapi_lock);
     for (int i = 0; i < MAX_WEBAPI_REQS; i++) {
         if (!s_webapi_reqs[i].in_use) {
             s_webapi_reqs[i].in_use = 1;
             s_webapi_reqs[i].id = id;
+            s_webapi_reqs[i].method = method;
             strncpy(s_webapi_reqs[i].group, group ? group : "", sizeof(s_webapi_reqs[i].group) - 1);
             s_webapi_reqs[i].group[sizeof(s_webapi_reqs[i].group) - 1] = '\0';
             strncpy(s_webapi_reqs[i].path, path ? path : "", sizeof(s_webapi_reqs[i].path) - 1);
@@ -337,19 +813,76 @@ static ABI int32_t np_webapi_create_req(int32_t user_ctx, const char *group, con
     }
     pthread_mutex_unlock(&s_webapi_lock);
     if (req_id) *req_id = (int64_t)id;
-    runtime_net_trace("sceNpWebApiCreateRequest: group='%s', path='%s', req_id=%d", group ? group : "", path ? path : "", id);
+    runtime_net_trace("sceNpWebApiCreateRequest: group='%s', path='%s', method=%d, req_id=%d",
+                      group ? group : "", path ? path : "", method, id);
     return 0;
 }
 
 static char *get_webapi_response_for_req(const WebApiReq *req) {
-    if (strstr(req->path, "friendList") || strstr(req->path, "friends")) {
+    runtime_net_trace("get_webapi_response_for_req: path='%s', method=%d", req->path, req->method);
+
+    if (strstr(req->path, "friendList")) {
         return generate_friends_json();
+    }
+    if (strstr(req->path, "friendOnlineIdLists")) {
+        return generate_friend_online_id_lists_json();
+    }
+    if (strstr(req->path, "profile") || strstr(req->path, "profiles")) {
+        return generate_profiles_json(req->path);
+    }
+    if (strstr(req->path, "friends/sessions")) {
+        return generate_friend_sessions_json();
+    }
+    if (strstr(req->path, "@users/sessions")) {
+        return generate_multiuser_sessions_json();
     }
     if (strstr(req->path, "entitlements")) {
         return strdup("{\"entitlements\":[],\"totalResults\":0,\"start\":0,\"size\":0}");
     }
-    if (strstr(req->path, "sessions")) {
-        return strdup("{\"invitations\":[],\"sessions\":[],\"totalResults\":0}");
+    if (strstr(req->path, "invitations") && req->method == 1) {
+        return strdup("{\"invitationId\":\"inv-sent\"}");
+    }
+    if (strstr(req->path, "invitations")) {
+        return generate_invitations_json();
+    }
+    /* POST /v1/sessions -> create session (method 1 is POST in OrbisNpWebApiHttpMethod) */
+    if (req->method == 1 && strstr(req->path, "/v1/sessions")) {
+        const char *my_name = runtime_np_get_online_name();
+        char sid[128];
+        snprintf(sid, sizeof(sid), "cusa13795-session-%s", (my_name && *my_name) ? my_name : "host");
+        write_active_session(sid);
+        char resp[256];
+        snprintf(resp, sizeof(resp), "{\"sessionId\":\"%s\"}", sid);
+        runtime_net_trace("webapi: created session -> %s", resp);
+        return strdup(resp);
+    }
+    /* DELETE /v1/sessions -> delete session (method 3 is DELETE) */
+    if (req->method == 3 && strstr(req->path, "/v1/sessions")) {
+        remove_active_session();
+        return strdup("{}");
+    }
+    /* POST /v1/sessions/<id>/members -> join session */
+    if (strstr(req->path, "/v1/sessions/") && strstr(req->path, "/members")) {
+        return strdup("{\"sessionId\":\"cusa13795-session\"}");
+    }
+    /* GET /v1/sessions/<id> */
+    if (strstr(req->path, "/v1/sessions/")) {
+        const char *p = strstr(req->path, "/v1/sessions/") + 13;
+        char sid[128] = {0};
+        size_t si = 0;
+        while (p[si] && p[si] != '?' && p[si] != '/' && si < sizeof(sid) - 1) {
+            sid[si] = p[si];
+            si++;
+        }
+        sid[si] = '\0';
+        return generate_session_info_json(sid);
+    }
+    /* generic /v1/sessions query */
+    if (strstr(req->path, "/v1/sessions")) {
+        return generate_friend_sessions_json();
+    }
+    if (strstr(req->path, "friends")) {
+        return generate_friends_json();
     }
     return strdup("{}");
 }
@@ -416,6 +949,8 @@ static ABI int32_t np_webapi_read_data(int64_t req_id, void *data, uint64_t size
                 }
                 runtime_net_trace("sceNpWebApiReadData: req_id=%lld, read %zu bytes (pos=%zu/%zu)",
                                   (long long)req_id, to_copy, s_webapi_reqs[i].read_pos, s_webapi_reqs[i].response_len);
+                pthread_mutex_unlock(&s_webapi_lock);
+                return (int32_t)to_copy;
             }
             pthread_mutex_unlock(&s_webapi_lock);
             return 0;
@@ -588,9 +1123,34 @@ static ABI int32_t msg_result(MsgDialogResult *r) {
     r->result=0; r->button=1; memset(r->reserved,0,sizeof(r->reserved)); return 0;
 }
 /* NetCtl init/term bracket the disconnected state; a resolver abort has nothing to abort offline. */
-/* UserService event callbacks (ForNpToolkit): registered, never called (no login/logout happens). */
-static ABI int32_t user_event_register(void *cb,void *arg) { (void)cb; (void)arg; return 0; }
-static ABI int32_t user_event_unregister(void) { return 0; }
+/* UserService event callbacks (ForNpToolkit): registered and notify login of local user 1. */
+typedef struct SceUserServiceEvent {
+    int32_t eventType; /* 0 = SCE_USER_SERVICE_EVENT_TYPE_LOGIN */
+    int32_t userId;    /* 1 */
+} SceUserServiceEvent;
+typedef void (ABI *SceUserServiceEventCallback)(const SceUserServiceEvent *event, void *userData);
+
+static SceUserServiceEventCallback s_user_event_cb = NULL;
+static void *s_user_event_arg = NULL;
+
+static ABI int32_t user_event_register(void *cb, void *arg) {
+    s_user_event_cb = (SceUserServiceEventCallback)cb;
+    s_user_event_arg = arg;
+    runtime_net_trace("sceUserServiceRegisterEventCallback: registered cb=%p, arg=%p", cb, arg);
+    if (s_user_event_cb) {
+        SceUserServiceEvent ev;
+        ev.eventType = 0; /* SCE_USER_SERVICE_EVENT_TYPE_LOGIN */
+        ev.userId = 1;
+        runtime_net_trace("sceUserServiceRegisterEventCallback -> dispatching initial LOGIN for user 1");
+        s_user_event_cb(&ev, s_user_event_arg);
+    }
+    return 0;
+}
+static ABI int32_t user_event_unregister(void) {
+    s_user_event_cb = NULL;
+    s_user_event_arg = NULL;
+    return 0;
+}
 
 /* ImeDialog: text typed on the keyboard into the game window (title bar shows it).
  * OrbisImeDialogParam: user, type, languages(8), enter label, method, filter,

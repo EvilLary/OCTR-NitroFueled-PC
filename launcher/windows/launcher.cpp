@@ -644,7 +644,7 @@ void SaveGameIni() {
 void SyncOnlineBuffers() {
     App& a = g_app;
     std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
-    if (srv.empty() || srv == "127.0.0.1") {
+    if (srv.empty()) {
         srv = "octr.ryu7w7.xyz";
         a.game.Set("online_server", srv);
     }
@@ -1411,11 +1411,19 @@ void PlayTab() {
             ImGui::TextColored(kGreen, "%s %s", T("Listo:", "Ready:"), Describe(a.game_info).c_str());
             if (a.game.Flag("online", true)) {
                 std::string srv = a.game.Get("online_server", "octr.ryu7w7.xyz");
-                if (srv.empty() || srv == "127.0.0.1") srv = "octr.ryu7w7.xyz";
+                if (srv.empty()) srv = "octr.ryu7w7.xyz";
                 const std::string nick = a.game.Get("online_name", a.game.Get("user_name", "RyuNET"));
-                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
-                                   T("Servidor", "Server"), srv.c_str(),
-                                   T("Apodo", "Nick"), nick.c_str());
+                const std::string friends = a.game.Get("online_friends", "");
+                if (!friends.empty()) {
+                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s  |  %s: %s",
+                                       T("Servidor", "Server"), srv.c_str(),
+                                       T("Apodo", "Nick"), nick.c_str(),
+                                       T("Amigos", "Friends"), friends.c_str());
+                } else {
+                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "[Online RyuNET] %s: %s  |  %s: %s",
+                                       T("Servidor", "Server"), srv.c_str(),
+                                       T("Apodo", "Nick"), nick.c_str());
+                }
             } else {
                 ImGui::TextColored(kGrey, "[Online] %s", T("Modo offline (actívalo en Ajustes)", "Offline mode (enable in Settings)"));
             }
@@ -1833,8 +1841,15 @@ void SettingsTab() {
             a.game.Set("online_server", a.online_server_buf);
             SaveGameIni();
         }
-        HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz). Puerto HTTP opcional :8080.",
-                     "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz). Optional HTTP port :8080."));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("127.0.0.1")) {
+            std::strncpy(a.online_server_buf, "127.0.0.1", sizeof(a.online_server_buf) - 1);
+            a.online_server_buf[sizeof(a.online_server_buf) - 1] = '\0';
+            a.game.Set("online_server", a.online_server_buf);
+            SaveGameIni();
+        }
+        HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
+                     "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
 
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
         if (ImGui::InputText(T("Apodo (Nickname)", "Nickname"), a.online_name_buf, sizeof(a.online_name_buf))) {
@@ -1844,6 +1859,14 @@ void SettingsTab() {
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
         HelpMarker(T("Nombre del jugador online (máx. 16 caracteres alfanuméricos, [A-Za-z0-9_-]).",
                      "Online player name (max 16 characters, [A-Za-z0-9_-])."));
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24.0f);
+        if (ImGui::InputText(T("Amigos (Friends)", "Friends"), a.online_friends_buf, sizeof(a.online_friends_buf))) {
+            a.game.Set("online_friends", a.online_friends_buf);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) SaveGameIni();
+        HelpMarker(T("Lista de amigos para Partidas Privadas, separados por comas (ejemplo: ESDRONIX,Amigo2).",
+                     "List of friends for Private Matches, separated by commas (example: ESDRONIX,Friend2)."));
 
         ImGui::EndDisabled();
     }
@@ -2485,6 +2508,273 @@ void KeyboardTab() {
                                       "Grey: default key. Keys go by their place on the keyboard."));
 }
 
+// ---------------------------------------------------------------------------------------------
+// Gamepad tab: bbport.ini pad.<input>=<SDL gamepad button names> (src/runtime_pad.c reads them).
+
+struct PadInput {
+    const char* id;
+    const char* es;
+    const char* en;
+    const char* fallback;
+};
+
+constexpr PadInput kPadInputs[] = {
+    {"cross", "X (Acelerar / Seleccionar)", "Cross (Accelerate / Select)", "a"},
+    {"square", "Cuadrado (Frenar / Marcha atrás)", "Square (Brake / Reverse)", "x"},
+    {"circle", "Círculo", "Circle", "b"},
+    {"triangle", "Triángulo", "Triangle", "y"},
+    {"l1", "L1 / LB (Salto / Derrape)", "L1 / LB (Hop / Drift)", "leftshoulder"},
+    {"r1", "R1 / RB (Salto / Derrape)", "R1 / RB (Hop / Drift)", "rightshoulder"},
+    {"l2", "L2 / LT (Usar objeto / Ítem)", "L2 / LT (Use item)", "lefttrigger"},
+    {"r2", "R2 / RT (Mirar atrás)", "R2 / RT (Look back)", "righttrigger"},
+    {"l3", "L3 (Click stick izq.)", "L3 (Left stick click)", "leftstick"},
+    {"r3", "R3 (Click stick der.)", "R3 (Right stick click)", "rightstick"},
+    {"options", "Options / Start (Pausa)", "Options / Start (Pause)", "start"},
+    {"touchpad", "Touchpad / Back / Select", "Touchpad / Back / Select", "back,touchpad"},
+    {"up", "Cruceta arriba", "D-pad up", "dpup"},
+    {"down", "Cruceta abajo", "D-pad down", "dpdown"},
+    {"left", "Cruceta izquierda", "D-pad left", "dpleft"},
+    {"right", "Cruceta derecha", "D-pad right", "dpright"},
+};
+
+std::string PadButtonLabel(const std::string& name) {
+    static const std::map<std::string, std::pair<const char*, const char*>> labels = {
+        {"a", {"Cruz / A (Sur)", "Cross / A (South)"}},
+        {"b", {"Círculo / B (Este)", "Circle / B (East)"}},
+        {"x", {"Cuadrado / X (Oeste)", "Square / X (West)"}},
+        {"y", {"Triángulo / Y (Norte)", "Triangle / Y (North)"}},
+        {"leftshoulder", {"L1 / LB", "L1 / LB"}},
+        {"rightshoulder", {"R1 / RB", "R1 / RB"}},
+        {"lefttrigger", {"Gatillo L2 / LT", "Trigger L2 / LT"}},
+        {"righttrigger", {"Gatillo R2 / RT", "Trigger R2 / RT"}},
+        {"leftstick", {"Click L3 (Stick Izq.)", "L3 Click (Left Stick)"}},
+        {"rightstick", {"Click R3 (Stick Der.)", "R3 Click (Right Stick)"}},
+        {"start", {"Options / Start", "Options / Start"}},
+        {"back", {"Share / Back / Select", "Share / Back / Select"}},
+        {"touchpad", {"Touchpad", "Touchpad"}},
+        {"dpup", {"Cruceta Arriba", "D-pad Up"}},
+        {"dpdown", {"Cruceta Abajo", "D-pad Down"}},
+        {"dpleft", {"Cruceta Izquierda", "D-pad Left"}},
+        {"dpright", {"Cruceta Derecha", "D-pad Right"}},
+        {"guide", {"Botón Guía / PS", "Guide / PS"}},
+        {"misc1", {"Captura / Misc", "Capture / Misc"}},
+        {"paddle1", {"Palanca 1", "Paddle 1"}},
+        {"paddle2", {"Palanca 2", "Paddle 2"}},
+        {"paddle3", {"Palanca 3", "Paddle 3"}},
+        {"paddle4", {"Palanca 4", "Paddle 4"}},
+    };
+    const auto it = labels.find(name);
+    return it != labels.end() ? T(it->second.first, it->second.second) : name;
+}
+
+#pragma pack(push, 1)
+struct LauncherXInputGamepad {
+    WORD wButtons;
+    BYTE bLeftTrigger;
+    BYTE bRightTrigger;
+    SHORT sThumbLX;
+    SHORT sThumbLY;
+    SHORT sThumbRX;
+    SHORT sThumbRY;
+};
+struct LauncherXInputState {
+    DWORD dwPacketNumber;
+    LauncherXInputGamepad Gamepad;
+};
+#pragma pack(pop)
+
+typedef DWORD (WINAPI *PFN_LauncherXInputGetState)(DWORD dwUserIndex, void* pState);
+
+const char* PollGamepadButton() {
+    static HMODULE s_xinput = nullptr;
+    static PFN_LauncherXInputGetState s_getState = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        s_xinput = LoadLibraryA("xinput1_4.dll");
+        if (!s_xinput) s_xinput = LoadLibraryA("xinput1_3.dll");
+        if (!s_xinput) s_xinput = LoadLibraryA("xinput9_1_0.dll");
+        if (s_xinput) {
+            s_getState = (PFN_LauncherXInputGetState)GetProcAddress(s_xinput, "XInputGetState");
+        }
+    }
+    if (!s_getState) return nullptr;
+
+    for (DWORD i = 0; i < 4; ++i) {
+        LauncherXInputState state{};
+        if (s_getState(i, &state) == 0) {
+            if (state.Gamepad.bLeftTrigger > 80) return "lefttrigger";
+            if (state.Gamepad.bRightTrigger > 80) return "righttrigger";
+            if (state.Gamepad.wButtons & 0x1000) return "a";
+            if (state.Gamepad.wButtons & 0x2000) return "b";
+            if (state.Gamepad.wButtons & 0x4000) return "x";
+            if (state.Gamepad.wButtons & 0x8000) return "y";
+            if (state.Gamepad.wButtons & 0x0100) return "leftshoulder";
+            if (state.Gamepad.wButtons & 0x0200) return "rightshoulder";
+            if (state.Gamepad.wButtons & 0x0040) return "leftstick";
+            if (state.Gamepad.wButtons & 0x0080) return "rightstick";
+            if (state.Gamepad.wButtons & 0x0010) return "start";
+            if (state.Gamepad.wButtons & 0x0020) return "back";
+            if (state.Gamepad.wButtons & 0x0001) return "dpup";
+            if (state.Gamepad.wButtons & 0x0002) return "dpdown";
+            if (state.Gamepad.wButtons & 0x0004) return "dpleft";
+            if (state.Gamepad.wButtons & 0x0008) return "dpright";
+        }
+    }
+    return nullptr;
+}
+
+std::atomic<int> g_pad_capture{-1};
+bool g_pad_waiting_release = false;
+
+void GamepadTab() {
+    App& a = g_app;
+    ImGui::TextWrapped("%s", T("Mapeo de botones del mando (Jugador 1). Compatible con mandos de Xbox, PlayStation (DualShock / DualSense), Switch Pro y mandos genéricos. "
+                               "Pulsa \"Cambiar\" y presiona el botón en tu mando o selecciónalo en la pantalla. Se guarda en bbport.ini y se aplica en el próximo inicio.",
+                               "Player 1 gamepad button mapping. Supports Xbox, PlayStation (DualShock / DualSense), Switch Pro and generic controllers. "
+                               "Press \"Change\" and press the button on your controller or choose it on screen. Saved to bbport.ini, applies on next launch."));
+
+    const int capturing = g_pad_capture;
+    if (capturing >= 0) {
+        const char* polled = PollGamepadButton();
+        if (g_pad_waiting_release) {
+            if (!polled) g_pad_waiting_release = false;
+        } else if (polled) {
+            const PadInput& in = kPadInputs[capturing];
+            a.game.Set(std::string("pad.") + in.id, polled);
+            SaveGameIni();
+            g_pad_capture = -1;
+        }
+    }
+
+    if (capturing >= 0 && capturing < int(std::size(kPadInputs))) {
+        const PadInput& in = kPadInputs[capturing];
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Border, kYellow);
+        ImGui::BeginChild("pad_assign_box", ImVec2(0, 160), true);
+        ImGui::TextColored(kYellow, "%s: %s", T("ASIGNAR BOTÓN PARA", "ASSIGN BUTTON FOR"), T(in.es, in.en));
+        ImGui::TextColored(kGrey, "%s", T("Presiona cualquier botón o gatillo en tu mando, o haz clic en uno de abajo:",
+                                          "Press any button or trigger on your controller, or click one below:"));
+        ImGui::Spacing();
+
+        auto AddBtn = [&](const char* id, const char* label) {
+            if (ImGui::Button(label)) {
+                a.game.Set(std::string("pad.") + in.id, id);
+                SaveGameIni();
+                g_pad_capture = -1;
+            }
+            ImGui::SameLine();
+        };
+
+        AddBtn("a", "Cruz / A");
+        AddBtn("b", "Círculo / B");
+        AddBtn("x", "Cuadrado / X");
+        AddBtn("y", "Triángulo / Y");
+        AddBtn("leftshoulder", "L1 / LB");
+        AddBtn("rightshoulder", "R1 / RB");
+        ImGui::NewLine();
+        AddBtn("lefttrigger", "Gatillo L2 / LT");
+        AddBtn("righttrigger", "Gatillo R2 / RT");
+        AddBtn("dpup", "Cruceta Arriba");
+        AddBtn("dpdown", "Cruceta Abajo");
+        AddBtn("dpleft", "Cruceta Izq.");
+        AddBtn("dpright", "Cruceta Der.");
+        ImGui::NewLine();
+        AddBtn("leftstick", "L3 (Stick Izq.)");
+        AddBtn("rightstick", "R3 (Stick Der.)");
+        AddBtn("start", "Start / Options");
+        AddBtn("back", "Select / Back");
+        AddBtn("touchpad", "Touchpad");
+        if (ImGui::Button(T("Cancelar (Esc)", "Cancel (Esc)"))) {
+            g_pad_capture = -1;
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+    }
+
+    ImGui::SeparatorText(T("Botones del mando", "Gamepad buttons"));
+    if (ImGui::BeginTable("pad_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn(T("Acción", "Action"), ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn(T("Botón asignado", "Assigned button"), ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, ImGui::GetFontSize() * 11.0f);
+        ImGui::TableHeadersRow();
+
+        for (int i = 0; i < int(std::size(kPadInputs)); ++i) {
+            const PadInput& in = kPadInputs[i];
+            const std::string key = std::string("pad.") + in.id;
+            const bool custom = a.game.values.count(key) > 0;
+            const auto buttons = SplitKeys(custom ? a.game.Get(key) : in.fallback);
+
+            ImGui::PushID(i + 200);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T(in.es, in.en));
+
+            ImGui::TableNextColumn();
+            ImGui::AlignTextToFramePadding();
+            if (capturing == i) {
+                ImGui::TextColored(kYellow, "%s", T("Esperando botón...", "Waiting for button..."));
+            } else if (buttons.empty()) {
+                ImGui::TextColored(kGrey, "%s", T("(sin botón asignado)", "(unbound)"));
+            } else {
+                std::string text;
+                for (const auto& b : buttons) text += (text.empty() ? "" : "  /  ") + PadButtonLabel(b);
+                if (custom) ImGui::TextUnformatted(text.c_str());
+                else ImGui::TextColored(kGrey, "%s", text.c_str());
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::BeginDisabled(capturing >= 0);
+            if (ImGui::SmallButton(T("Cambiar", "Change"))) {
+                g_pad_capture = i;
+                g_pad_waiting_release = (PollGamepadButton() != nullptr);
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(T("Quitar", "Clear"))) {
+                a.game.Set(key, "");
+                SaveGameIni();
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!custom);
+            if (ImGui::SmallButton(T("Original", "Default"))) {
+                a.game.Erase(key);
+                SaveGameIni();
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText(T("Preajustes rápidos", "Quick presets"));
+    ImGui::BeginDisabled(capturing >= 0);
+    if (ImGui::Button(T("Cruceta Abajo = L2 (Usar Ítem)", "D-pad Down = L2 (Use Item)"))) {
+        a.game.Set("pad.l2", "dpdown");
+        a.game.Set("pad.down", "lefttrigger");
+        SaveGameIni();
+        a.notice = T("Preajuste aplicado: Cruceta Abajo configurada como L2 (Ítem) y Gatillo L2 como Cruceta Abajo.",
+                     "Preset applied: D-pad Down set to L2 (Item) and Trigger L2 set to D-pad Down.");
+    }
+    HelpMarker(T("Intercambia la Cruceta Abajo con el Gatillo L2. Ideal para disparar objetos con la flecha de abajo.",
+                 "Swaps D-pad Down with Trigger L2. Ideal for using items with down arrow."));
+    ImGui::SameLine();
+    if (ImGui::Button(T("Restaurar todos los botones", "Restore all pad buttons"))) {
+        for (const auto& in : kPadInputs) a.game.Erase(std::string("pad.") + in.id);
+        SaveGameIni();
+        a.notice = T("Todos los botones del mando se restauraron a los valores originales.",
+                     "All gamepad buttons restored to defaults.");
+    }
+    ImGui::EndDisabled();
+    ImGui::Spacing();
+    ImGui::TextColored(kGrey, "%s", T("Gris: asignación por defecto. Blanco: botón personalizado guardado en bbport.ini.",
+                                      "Grey: default binding. White: custom binding saved to bbport.ini."));
+}
+
 void ToolsTab() {
     App& a = g_app;
     ImGui::SeparatorText(T("Carpetas y registro", "Folders and log"));
@@ -2594,6 +2884,14 @@ void Frame() {
             SettingsTab();
             ImGui::EndChild();
             ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(T("Mando", "Gamepad"))) {
+            ImGui::BeginChild("gamepad");
+            GamepadTab();
+            ImGui::EndChild();
+            ImGui::EndTabItem();
+        } else if (g_pad_capture >= 0) {
+            g_pad_capture = -1;
         }
         if (ImGui::BeginTabItem(T("Teclado", "Keyboard"))) {
             ImGui::BeginChild("keyboard");
@@ -2769,6 +3067,13 @@ void CleanupDevice() {
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    // Gamepad tab: Esc cancels capture
+    if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_pad_capture >= 0) {
+        if (wparam == VK_ESCAPE) {
+            g_pad_capture = -1;
+            return 0;
+        }
+    }
     // Keyboard tab: the next key's scan code, before ImGui sees it.
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_key_capture >= 0) {
         const unsigned code = unsigned((lparam >> 16) & 0xff) | ((lparam & (1 << 24)) ? 0x100u : 0u);

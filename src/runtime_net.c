@@ -153,6 +153,17 @@ int32_t runtime_net_socket(const char *name, int domain, int type, int protocol)
         ioctlsocket(s, FIONBIO, &on);
     }
 
+#ifdef _WIN32
+    if (!is_stream) {
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+        BOOL bNewBehavior = FALSE;
+        DWORD dwBytesReturned = 0;
+        WSAIoctl(s, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+    }
+#endif
+
     int vfd = vsocket_alloc(s, is_stream, name);
     if (vfd > 0 && is_nonblock) {
         VSocket *vs = vsocket_get(vfd);
@@ -231,9 +242,12 @@ int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) 
         sin.sin_port = htons(3075);
     }
 
-    /* Always enable SO_REUSEADDR on bound sockets to prevent address in use */
-    int opt = 1;
-    setsockopt(vs->s, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+    /* Enable SO_REUSEADDR only for TCP streams. On UDP (Windows), SO_REUSEADDR allows port stealing
+     * which breaks local multi-instance testing. Keeping it off allows WSAEADDRINUSE to trigger the retry loop. */
+    if (vs->is_stream) {
+        int opt = 1;
+        setsockopt(vs->s, SOL_SOCKET, SO_REUSEADDR, (const char *)&opt, sizeof(opt));
+    }
 
     runtime_net_trace("sceNetBind(fd=%d, port=%u)", s, ntohs(sin.sin_port));
     int ret = bind(vs->s, (struct sockaddr *)&sin, sizeof(sin));

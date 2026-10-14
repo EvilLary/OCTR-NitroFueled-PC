@@ -153,7 +153,7 @@ def setup_online(env, config, data):
     env['BB_ONLINE'] = '1'
     env['BB_NET_TRACE'] = '1'
     server = env.get('BB_ONLINE_SERVER', ini_values.get('online_server', 'octr.ryu7w7.xyz'))
-    if not server or server.strip() == '' or server == '127.0.0.1':
+    if not server or server.strip() == '':
         server = 'octr.ryu7w7.xyz'
     host = server
     auth_port = env.get('BB_ONLINE_HTTP_PORT', ini_values.get('online_http_port', '8080'))
@@ -198,6 +198,10 @@ def setup_online(env, config, data):
         # never touch the real servers.
         "pipes-prod-glutton.public.aws.demonware.net": f"http://{host}:{auth_port}",
         "objectstore.prod.demonware.net": f"http://{host}:{auth_port}",
+        # Demonware friends API (eboot rodata ~0x1bef504, base http://friends.dev...):
+        # list / invitation / pending / pair. Routed to the server's friends
+        # handler; without this the game gets EHOSTUNREACH and shows no friends.
+        "friends.dev.demonware.net": f"http://{host}:{auth_port}",
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
