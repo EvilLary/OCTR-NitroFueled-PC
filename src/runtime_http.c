@@ -366,6 +366,20 @@ int32_t runtime_http_send_request(int32_t req, const void *post_data, size_t siz
         hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen,
                          "%s: %s\r\n", r->req_headers[i].name, r->req_headers[i].value);
     }
+    /* RyuNET nickname ownership: the server lets this installation's secret (BB_ONLINE_KEY,
+     * written by the launcher or run.py) keep the nickname it first used. Sent only to hosts
+     * redirected to the RyuNET server, never to a real one. */
+    const char *key = c->is_plain_http ? getenv("BB_ONLINE_KEY") : NULL;
+    if (key && strlen(key) == 64 && strspn(key, "0123456789abcdefABCDEF") == 64 &&
+        hlen < (int)sizeof(header_buf) - 96) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Key: %s\r\n", key);
+    }
+    /* The player chose to keep their save's Pit Stop items (BB_ONLINE_INVENTORY=save, from the
+     * launcher's Online tab): the server then leaves the game its save's inventory. */
+    const char *inventory = c->is_plain_http ? getenv("BB_ONLINE_INVENTORY") : NULL;
+    if (inventory && strcmp(inventory, "save") == 0 && hlen < (int)sizeof(header_buf) - 48) {
+        hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "X-RyuNET-Inventory: save\r\n");
+    }
     hlen += snprintf(header_buf + hlen, sizeof(header_buf) - hlen, "\r\n");
 
     send(s, header_buf, hlen, 0);

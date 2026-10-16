@@ -149,7 +149,7 @@ int32_t runtime_net_socket(const char *name, int domain, int type, int protocol)
     }
 
     if (is_nonblock) {
-        u_long on = 1;
+        unsigned long on = 1;
         ioctlsocket(s, FIONBIO, &on);
     }
 
@@ -222,6 +222,33 @@ int32_t runtime_net_connect(int s, const OrbisNetSockaddr *addr, uint32_t addrle
     return ORBIS_OK;
 }
 
+/* Whether the RyuNET server runs on this machine: no server set, loopback, or one of this
+ * PC's own addresses (a Radmin/ZeroTier/LAN IP its friends also use). Only an address that
+ * belongs to this machine can be bound, which is how it is told apart. The game then must not
+ * take the server's UDP 3074: Windows lets both sockets bind it, and the game's NAT probes
+ * came back to the game itself instead of the server ("could not start the network"). */
+static int server_is_this_machine(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    const char *srv = getenv("BB_ONLINE_SERVER");
+    if (!srv || !*srv || strcmp(srv, "127.0.0.1") == 0 || _stricmp(srv, "localhost") == 0) return cached = 1;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(srv, NULL, &hints, &res) != 0 || !res) return cached = 0;
+    struct sockaddr_in addr = *(const struct sockaddr_in *)res->ai_addr;
+    freeaddrinfo(res);
+    if ((ntohl(addr.sin_addr.s_addr) >> 24) == 127) return cached = 1;
+    SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (probe == INVALID_SOCKET) return cached = 0;
+    addr.sin_port = 0;
+    cached = bind(probe, (struct sockaddr *)&addr, sizeof(addr)) == 0;
+    closesocket(probe);
+    runtime_net_trace("RyuNET server %s is %s", srv, cached ? "this machine: the game avoids UDP 3074" : "another machine");
+    return cached;
+}
+
 int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) {
     (void)addrlen;
     VSocket *vs = vsocket_get(s);
@@ -233,12 +260,10 @@ int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) 
     const OrbisNetSockaddrIn *in = (const OrbisNetSockaddrIn *)addr;
     sin.sin_family = in->sin_family;
     sin.sin_port = in->sin_port;
-    const char *srv = getenv("BB_ONLINE_SERVER");
-    int is_local = (!srv || strcmp(srv, "127.0.0.1") == 0 || strcmp(srv, "localhost") == 0);
     const char *p_env = getenv("BB_ONLINE_PORT");
     if (p_env && atoi(p_env) > 0) {
         sin.sin_port = htons((uint16_t)atoi(p_env));
-    } else if (is_local && ntohs(sin.sin_port) == 3074) {
+    } else if (ntohs(sin.sin_port) == 3074 && server_is_this_machine()) {
         sin.sin_port = htons(3075);
     }
 
@@ -285,7 +310,7 @@ int32_t runtime_net_accept(int s, OrbisNetSockaddr *addr, uint32_t *addrlen) {
     if (!vs) return ORBIS_NET_EBADF;
 
     struct sockaddr_in sin;
-    int sin_len = sizeof(sin);
+    NativeSockLen sin_len = sizeof(sin);
     SOCKET client = accept(vs->s, (struct sockaddr *)&sin, &sin_len);
     if (client == INVALID_SOCKET) {
         g_net_errno = WSAGetLastError();
@@ -404,7 +429,7 @@ int32_t runtime_net_recvfrom(int s, void *buf, size_t len, int flags, OrbisNetSo
     if (flags & 0x40) win_flags |= MSG_WAITALL;
 
     struct sockaddr_in sin;
-    int sin_len = sizeof(sin);
+    NativeSockLen sin_len = sizeof(sin);
     int ret = recvfrom(vs->s, (char *)buf, (int)len, win_flags, (struct sockaddr *)&sin, &sin_len);
     if (ret < 0) {
         int err = WSAGetLastError();
@@ -435,7 +460,7 @@ int32_t runtime_net_setsockopt(int s, int level, int optname, const void *optval
     if (!vs) return ORBIS_NET_EBADF;
 
     if (optname == ORBIS_NET_SO_NBIO) {
-        u_long mode = optval ? *(const uint32_t *)optval : 0;
+        unsigned long mode = optval ? *(const uint32_t *)optval : 0;
         vs->non_blocking = (mode != 0);
         int ret = ioctlsocket(vs->s, FIONBIO, &mode);
         runtime_net_trace("sceNetSetsockopt(fd=%d, SO_NBIO=%lu) -> %d", s, mode, ret);
@@ -511,7 +536,7 @@ int32_t runtime_net_getsockopt(int s, int level, int optname, void *optval, uint
         }
     }
 
-    int len = optlen ? (int)*optlen : 0;
+    NativeSockLen len = optlen ? (NativeSockLen)*optlen : 0;
     int ret = getsockopt(vs->s, win_level, win_optname, (char *)optval, &len);
     if (optlen) *optlen = len;
     if (ret != 0) {
@@ -529,7 +554,7 @@ int32_t runtime_net_getsockname(int s, OrbisNetSockaddr *name, uint32_t *namelen
     if (!vs) return ORBIS_NET_EBADF;
 
     struct sockaddr_in sin;
-    int sin_len = sizeof(sin);
+    NativeSockLen sin_len = sizeof(sin);
     int ret = getsockname(vs->s, (struct sockaddr *)&sin, &sin_len);
     if (ret != 0) return -1;
 

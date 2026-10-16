@@ -13,7 +13,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 10u; // sacredfire: sanitized float-to-int conversion (SSR ray marching loop fix)
+static constexpr u32 ShaderBinaryVersion = 11u; // sacredfire: float-to-int as GCN (NaN 0, saturated); draw loop budget
 static constexpr u32 ShaderMetaVersion = 8u; // sacredfire: GS runtime info compared in full
 static constexpr u32 PipelineKeyVersion = 7u; // sacredfire: GS permutations re-indexed; MSAA setting
 } // namespace Serialization

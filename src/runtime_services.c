@@ -117,12 +117,146 @@ static ABI int32_t system_param(int32_t id,int32_t *value) {
     }
     return 0;
 }
+/* ---- Session invitations (RyuNET, accepted in Discord) ----
+ * When the player accepts a Discord invite, the launcher writes ryunet_join.txt next to
+ * bbport.ini: "session=<PSN session id>\nhost=<nickname>\ntime=<unix seconds>\n". The game
+ * hears about it the way a PS4 tells it about an invitation accepted in the system UI:
+ * sceSystemServiceGetStatus counts a pending event and sceSystemServiceReceiveEvent hands it
+ * SESSION_INVITATION (0x10000002), whose param is SceNpSessionInvitationEventParam
+ * (shadPS4 invitation_dialog.h, static_asserted offsets/sizes there):
+ *   +0x00 sessionId OrbisNpSessionId (char[45]+term+pad = 48)
+ *   +0x30 invitationId OrbisNpInvitationId (char[60]+term = 61)
+ *   +0x70 flag u32 (1 = invitation)
+ *   +0x74 padding[4]
+ *   +0x78 onlineId OrbisNpOnlineId (char[16]+term+dummy = 20) of the local user who accepted
+ *   +0x8C userId s32 of the local user who accepted (USER_ID, single-user system)
+ *   +0x90 referralOnlineId (24) of the inviter
+ *   +0xA8 referralAccountId u64 of the inviter
+ * (176 bytes total: the game copies exactly 0xB0, eboot 0xb89d44.) The userId
+ * MUST be the accepting local user: with 0 the game reports "not the active
+ * user" and retries the join forever. The game drops an invitation that comes
+ * while it is busy (0xa99af0), so it is offered again every few seconds until the game joins
+ * that session (POST /v1/sessions/<id>/members, see invite_session_joined) or it expires. */
+const char *runtime_np_get_online_name(void);
+uint64_t runtime_np_calculate_account_id(const char *name);
+#define SYSTEM_EVENT_SESSION_INVITATION 0x10000002
+/* taken: the game asked for the invited session (GET /v1/sessions/<id>), so it acted on the
+ * invitation; it is not offered again (each offer it acts on shows its own message). */
+static struct { char session[64]; char host[32]; time_t expires, next_offer; int active, taken; } s_invite;
+static pthread_mutex_t s_invite_lock=PTHREAD_MUTEX_INITIALIZER;
+
+static int invite_text_ok(const char *s, size_t max) {
+    size_t n=strlen(s);
+    if (!n || n>max) return 0;
+    for (size_t i=0;i<n;++i) {
+        const char c=s[i];
+        if (!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-')) return 0;
+    }
+    return 1;
+}
+
+/* Picks up ryunet_join.txt (at most once a second) and removes it. */
+static void poll_invite_file(void) {
+    static time_t last_check;
+    const time_t now=time(NULL);
+    if (now==last_check) return;
+    last_check=now;
+    char path[600];
+    const char *cfg=getenv("BB_CONFIG");
+    const char *slash=cfg ? strrchr(cfg,'/') : NULL;
+    const char *bslash=cfg ? strrchr(cfg,'\\') : NULL;
+    if (bslash>slash) slash=bslash;
+    if (slash) snprintf(path,sizeof path,"%.*s/ryunet_join.txt",(int)(slash-cfg),cfg);
+    else snprintf(path,sizeof path,"ryunet_join.txt");
+    FILE *f=fopen(path,"r");
+    if (!f) return;
+    char line[256], session[64]="", host[32]="";
+    long long written=0;
+    while (fgets(line,sizeof line,f)) {
+        line[strcspn(line,"\r\n")]=0;
+        if (!strncmp(line,"session=",8)) snprintf(session,sizeof session,"%s",line+8);
+        else if (!strncmp(line,"host=",5)) snprintf(host,sizeof host,"%s",line+5);
+        else if (!strncmp(line,"time=",5)) written=atoll(line+5);
+    }
+    fclose(f);
+    remove(path);
+    /* A stale file (a game that never started) must not join a match hours later. */
+    if (!invite_text_ok(session,45) || !invite_text_ok(host,16) || written<(long long)now-300 || written>(long long)now+60) {
+        printf("Runtime: ignored an invitation file (session='%s' host='%s' age=%llds)\n",session,host,(long long)now-written);
+        return;
+    }
+    pthread_mutex_lock(&s_invite_lock);
+    snprintf(s_invite.session,sizeof s_invite.session,"%s",session);
+    snprintf(s_invite.host,sizeof s_invite.host,"%s",host);
+    s_invite.expires=now+240;  /* time for a game started by the invite to reach the menus */
+    s_invite.next_offer=now;
+    s_invite.active=1;
+    s_invite.taken=0;
+    pthread_mutex_unlock(&s_invite_lock);
+    printf("Runtime: invitation from %s accepted in Discord: joining session %s\n",host,session);
+}
+
+static int invite_due(void) {
+    poll_invite_file();
+    const time_t now=time(NULL);
+    pthread_mutex_lock(&s_invite_lock);
+    if (s_invite.active && now>=s_invite.expires) {
+        s_invite.active=0;
+        printf("Runtime: invitation from %s expired: the game never joined it\n",s_invite.host);
+    }
+    const int due=s_invite.active && !s_invite.taken && now>=s_invite.next_offer;
+    pthread_mutex_unlock(&s_invite_lock);
+    return due;
+}
+
+/* The game asked for this session: it acts on the invitation, which is not offered again. */
+static void invite_session_taken(const char *session) {
+    pthread_mutex_lock(&s_invite_lock);
+    if (s_invite.active && !s_invite.taken && session && !strcmp(session,s_invite.session)) {
+        s_invite.taken=1;
+        printf("Runtime: the game took the invitation from %s (reading its session)\n",s_invite.host);
+    }
+    pthread_mutex_unlock(&s_invite_lock);
+}
+
+/* The game joined a session: an invitation to it is done. */
+static void invite_session_joined(const char *path) {
+    pthread_mutex_lock(&s_invite_lock);
+    if (s_invite.active && path && strstr(path,s_invite.session)) {
+        s_invite.active=0;
+        printf("Runtime: joined %s's session from the Discord invitation\n",s_invite.host);
+    }
+    pthread_mutex_unlock(&s_invite_lock);
+}
+
 static ABI int32_t system_status(unsigned char *status) {
     if (!status) return SYSTEM_PARAMETER;
     memset(status,0,12); /* event_num=0, no overlay, foreground, normal CPU mode */
+    if (invite_due()) *(int32_t *)status=1;
     return 0;
 }
-static ABI int32_t system_event(void *event) { (void)event; return SYSTEM_NO_EVENT; }
+static ABI int32_t system_event(void *event) {
+    if (!event) return SYSTEM_PARAMETER;
+    const time_t now=time(NULL);
+    pthread_mutex_lock(&s_invite_lock);
+    if (!s_invite.active || s_invite.taken || now<s_invite.next_offer) { pthread_mutex_unlock(&s_invite_lock); return SYSTEM_NO_EVENT; }
+    s_invite.next_offer=now+4;
+    unsigned char *e=(unsigned char *)event;
+    memset(e,0,4+0xB0);
+    *(int32_t *)e=SYSTEM_EVENT_SESSION_INVITATION;
+    unsigned char *param=e+4;
+    snprintf((char *)param+0x00,45+1,"%s",s_invite.session);
+    snprintf((char *)param+0x30,60+1,"inv-%s",s_invite.host);
+    *(uint32_t *)(param+0x70)=1; /* SCE_NP_SESSION_INVITATION_EVENT_FLAG_INVITATION */
+    const char *me=runtime_np_get_online_name();
+    snprintf((char *)param+0x78,16+1,"%s",me ? me : "");
+    *(int32_t *)(param+0x8C)=(int32_t)USER_ID; /* accepting local user: 0 reads as "not the active user" */
+    snprintf((char *)param+0x90,16+1,"%s",s_invite.host); /* referral = inviter */
+    *(uint64_t *)(param+0xA8)=runtime_np_calculate_account_id(s_invite.host);
+    printf("Runtime: SESSION_INVITATION offered to the game (session %s, from %s)\n",s_invite.session,s_invite.host);
+    pthread_mutex_unlock(&s_invite_lock);
+    return 0;
+}
 static ABI int32_t hide_splash(void) { note("SystemService: splash screen hidden"); return 0; }
 static ABI int32_t launch_browser(void) { note("SystemService: web browser request ignored (offline)"); return 0; }
 
@@ -281,6 +415,107 @@ static void get_sessions_dir(char *out, size_t out_len) {
 #endif
 }
 
+/* ---- Session members (RyuNET) ----
+ * POST /v1/sessions/<id>/members joins that session as the local user. The
+ * game then reads the session back and requires the local user to be listed
+ * as a member, otherwise it reports "not the active user" and retries the
+ * join forever (the repeated AVISO dialog). So every join is recorded.
+ * Members live next to the session files, one `onlineId|accountId` per line
+ * in sessions/members-<sid>.txt, so two local instances share them. Remote
+ * players need server-side membership; only users seen joining on this
+ * machine are ever recorded here. At most 8 members per session. */
+static pthread_mutex_t s_members_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int session_members_path(const char *sid, char *out, size_t out_size) {
+    if (!sid || !*sid) return 0;
+    size_t n = strlen(sid);
+    if (n == 0 || n > 90) return 0;
+    for (size_t i = 0; i < n; ++i) {
+        const char c = sid[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+    }
+    char dir[512];
+    get_sessions_dir(dir, sizeof(dir));
+    snprintf(out, out_size, "%s/members-%s.txt", dir, sid);
+    return 1;
+}
+
+/* Records the local user as a member of sid. Returns total members. */
+static int record_session_member(const char *sid) {
+    const char *me = runtime_np_get_online_name();
+    if (!me || !*me) return 0;
+    char path[512];
+    if (!session_members_path(sid, path, sizeof(path))) return 0;
+    pthread_mutex_lock(&s_members_lock);
+    char seen[8][64];
+    int count = 0;
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[160];
+        while (count < 8 && fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            char *bar = strchr(line, '|');
+            if (!line[0] || !bar) continue;
+            *bar = 0;
+            int dup = 0;
+            for (int i = 0; i < count; ++i) dup = dup || strcmp(seen[i], line) == 0;
+            if (!dup) snprintf(seen[count++], sizeof(seen[0]), "%s", line);
+        }
+        fclose(f);
+    }
+    int present = 0;
+    for (int i = 0; i < count; ++i) present = present || strcmp(seen[i], me) == 0;
+    if (!present && count < 8) {
+        f = fopen(path, "a");
+        if (f) {
+            fprintf(f, "%s|%llu\n", me, (unsigned long long)runtime_np_calculate_account_id(me));
+            fclose(f);
+            snprintf(seen[count++], sizeof(seen[0]), "%s", me);
+        }
+    }
+    pthread_mutex_unlock(&s_members_lock);
+    runtime_net_trace("webapi: %s joined session %s (%d member(s))", me, sid, count);
+    return count;
+}
+
+/* Fills names/accs with the recorded members of sid (up to max). Returns count. */
+static int read_session_members(const char *sid, char names[][64], uint64_t *accs, int max) {
+    char path[512];
+    int count = 0;
+    if (max <= 0 || !session_members_path(sid, path, sizeof(path))) return 0;
+    pthread_mutex_lock(&s_members_lock);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[160];
+        while (count < max && fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            char *bar = strchr(line, '|');
+            if (!line[0] || !bar) continue;
+            *bar = 0;
+            snprintf(names[count], 64, "%s", line);
+            accs[count] = strtoull(bar + 1, NULL, 10);
+            if (accs[count] == 0) accs[count] = runtime_np_calculate_account_id(names[count]);
+            count++;
+        }
+        fclose(f);
+    }
+    pthread_mutex_unlock(&s_members_lock);
+    return count;
+}
+
+/* Members recorded for sid excluding host_name (the host is counted separately). */
+static int session_join_count(const char *sid, const char *host_name) {
+    char names[8][64];
+    uint64_t accs[8];
+    int n = read_session_members(sid, names, accs, 8);
+    int joins = 0;
+    for (int i = 0; i < n; ++i) {
+        if (!host_name || strcmp(names[i], host_name) != 0) joins++;
+    }
+    return joins;
+}
+
 static void write_active_session(const char *session_id) {
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
@@ -308,6 +543,12 @@ static void remove_active_session(void) {
     char path[512];
     snprintf(path, sizeof(path), "%s/%s.session", dir, my_name);
     remove(path);
+    /* Joins recorded for our own session end with it (no stale members). */
+    {
+        char sid[128], mpath[512];
+        snprintf(sid, sizeof(sid), "cusa13795-session-%s", my_name);
+        if (session_members_path(sid, mpath, sizeof(mpath))) remove(mpath);
+    }
     runtime_net_trace("remove_active_session: removed '%s'", path);
 }
 
@@ -497,6 +738,8 @@ static char *generate_friend_online_id_lists_json(void) {
     return strdup(buf);
 }
 
+static char *invitation_json(const char *host);
+
 static char *generate_invitations_json(void) {
     char dir[512];
     get_sessions_dir(dir, sizeof(dir));
@@ -574,6 +817,22 @@ static char *generate_invitations_json(void) {
         }
     }
 
+    /* The invitation accepted in Discord: its host's session file lives on another PC. */
+    pthread_mutex_lock(&s_invite_lock);
+    char pending_host[32] = "";
+    if (s_invite.active) snprintf(pending_host, sizeof(pending_host), "%s", s_invite.host);
+    pthread_mutex_unlock(&s_invite_lock);
+    char pending_marker[48];
+    snprintf(pending_marker, sizeof(pending_marker), "\"inv-%s\"", pending_host);
+    if (pending_host[0] && !strstr(buf, pending_marker) && pos + 1024 < sizeof(buf)) {
+        char *one = invitation_json(pending_host);
+        if (one) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%s%s", count > 0 ? "," : "", one);
+            free(one);
+            count++;
+        }
+    }
+
     pos += snprintf(buf + pos, sizeof(buf) - pos, "],\"size\":%d,\"totalResults\":%d}", count, count);
     runtime_net_trace("generate_invitations_json: found %d invitation(s)", count);
     return strdup(buf);
@@ -631,13 +890,14 @@ static char *generate_friend_sessions_json(void) {
                     if (count > 0) {
                         pos += snprintf(buf + pos, sizeof(buf) - pos, ",");
                     }
+                    int total = 1 + session_join_count(sid, token);
                     pos += snprintf(buf + pos, sizeof(buf) - pos,
                         "{"
                         "\"sessionId\":\"%s\","
                         "\"sessionName\":\"CTR Private Match\","
                         "\"sessionCreateTimestamp\":\"2026-10-14T00:00:00.000Z\","
                         "\"availablePlatforms\":[\"PS4\"],"
-                        "\"memberCount\":1,"
+                        "\"memberCount\":%d,"
                         "\"sessionLockFlag\":false,"
                         "\"friends\":[{"
                             "\"onlineId\":\"%s\","
@@ -645,7 +905,7 @@ static char *generate_friend_sessions_json(void) {
                             "\"platform\":\"PS4\""
                         "}]"
                         "}",
-                        sid, token, (unsigned long long)acc_id);
+                        sid, total, token, (unsigned long long)acc_id);
                     count++;
                 }
             }
@@ -735,7 +995,6 @@ static char *generate_multiuser_sessions_json(void) {
 }
 
 static char *generate_session_info_json(const char *session_id) {
-    char buf[1024];
     char host_name[64] = "Player";
     uint64_t acc_id = 0;
 
@@ -768,7 +1027,14 @@ static char *generate_session_info_json(const char *session_id) {
         acc_id = runtime_np_calculate_account_id(host_name);
     }
 
-    snprintf(buf, sizeof(buf),
+    /* members: the host plus everyone recorded by POST .../members. The game
+     * requires the local user here, else "not the active user". */
+    char mnames[8][64];
+    uint64_t maccs[8];
+    int nmem = read_session_members(session_id ? session_id : "", mnames, maccs, 8);
+    char buf[2048];
+    size_t pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
         "{"
         "\"sessionId\":\"%s\","
         "\"sessionName\":\"CTR Private Match\","
@@ -778,14 +1044,32 @@ static char *generate_session_info_json(const char *session_id) {
         "\"sessionStatus\":\"in_lobby\","
         "\"sessionLockFlag\":false,"
         "\"availablePlatforms\":[\"PS4\"],"
+        /* sessionCreator: an invitation is joined through the session's creator (eboot
+         * 0xac4576 reads its accountId from the toolkit's Session; 0 there is "failed to
+         * retrieve friend information", 0xac4584), whose Demonware lobby is then looked up. */
+        "\"sessionCreator\":{"
+            "\"accountId\":\"%llu\","
+            "\"onlineId\":\"%s\","
+            "\"platform\":\"PS4\""
+        "},"
         "\"members\":[{"
             "\"accountId\":\"%llu\","
             "\"onlineId\":\"%s\","
             "\"platform\":\"PS4\""
-        "}]"
         "}",
         session_id ? session_id : "cusa13795-session",
-        (unsigned long long)acc_id, host_name);
+        (unsigned long long)acc_id, host_name, (unsigned long long)acc_id, host_name);
+    for (int i = 0; i < nmem && pos + 160 < sizeof(buf); ++i) {
+        if (strcmp(mnames[i], host_name) == 0) continue;
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+            ",{"
+            "\"accountId\":\"%llu\","
+            "\"onlineId\":\"%s\","
+            "\"platform\":\"PS4\""
+            "}",
+            (unsigned long long)maccs[i], mnames[i]);
+    }
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]}");
     return strdup(buf);
 }
 
@@ -818,8 +1102,59 @@ static ABI int32_t np_webapi_create_req(int32_t user_ctx, const char *group, con
     return 0;
 }
 
+/* One invitation from host to their session "cusa13795-session-<host>", the shape the list
+ * (generate_invitations_json) uses. Sessions are named after their host, so another PC's
+ * invitation needs no shared file: the Discord invite named the host. */
+static char *invitation_json(const char *host) {
+    char sid[96], buf[1024];
+    snprintf(sid, sizeof(sid), "cusa13795-session-%s", host);
+    snprintf(buf, sizeof(buf),
+        "{\"invitationId\":\"inv-%s\",\"sessionId\":\"%s\","
+        "\"receivedDate\":\"2026-10-14T00:00:00.000Z\",\"updateDate\":\"2026-10-14T00:00:00.000Z\","
+        "\"expired\":false,\"usedFlag\":false,"
+        "\"fromUser\":{\"onlineId\":\"%s\",\"accountId\":\"%llu\"},"
+        "\"session\":{\"sessionId\":\"%s\",\"sessionName\":\"CTR Private Match\",\"sessionLockFlag\":false}}",
+        host, sid, host, (unsigned long long)runtime_np_calculate_account_id(host), sid);
+    return strdup(buf);
+}
+
+/* The <id> in ".../<marker><id>[/?...]", or "" (at most out_size-1 characters). */
+static void path_segment_after(const char *path, const char *marker, char *out, size_t out_size) {
+    out[0] = '\0';
+    const char *p = path ? strstr(path, marker) : NULL;
+    if (!p) return;
+    p += strlen(marker);
+    size_t n = 0;
+    while (p[n] && p[n] != '?' && p[n] != '/' && n < out_size - 1) n++;
+    memcpy(out, p, n);
+    out[n] = '\0';
+}
+
 static char *get_webapi_response_for_req(const WebApiReq *req) {
     runtime_net_trace("get_webapi_response_for_req: path='%s', method=%d", req->path, req->method);
+
+    /* GET /v1/users/me/invitations/inv-<host>: one invitation, as after a SESSION_INVITATION event. */
+    if (req->method == 0 && strstr(req->path, "/invitations/inv-")) {
+        char host[64];
+        path_segment_after(req->path, "/invitations/inv-", host, sizeof(host));
+        if (host[0]) return invitation_json(host);
+    }
+    /* PUT on an invitation (e.g. marking it used): nothing to keep. */
+    if (req->method == 2 && strstr(req->path, "/invitations/")) {
+        return strdup("{}");
+    }
+    /* POST /v1/sessions/<id>/members -> join that session. Checked before "create", which also
+     * POSTs under /v1/sessions and used to answer a join with the joiner's own session. */
+    if (req->method == 1 && strstr(req->path, "/v1/sessions/") && strstr(req->path, "/members")) {
+        char sid[96];
+        path_segment_after(req->path, "/v1/sessions/", sid, sizeof(sid));
+        if (sid[0]) record_session_member(sid);
+        invite_session_joined(req->path);
+        char resp[160];
+        snprintf(resp, sizeof(resp), "{\"sessionId\":\"%s\"}", sid[0] ? sid : "cusa13795-session");
+        runtime_net_trace("webapi: joined session -> %s", resp);
+        return strdup(resp);
+    }
 
     if (strstr(req->path, "friendList")) {
         return generate_friends_json();
@@ -863,6 +1198,10 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
     }
     /* POST /v1/sessions/<id>/members -> join session */
     if (strstr(req->path, "/v1/sessions/") && strstr(req->path, "/members")) {
+        char sid[96];
+        path_segment_after(req->path, "/v1/sessions/", sid, sizeof(sid));
+        if (sid[0]) record_session_member(sid);
+        invite_session_joined(req->path);
         return strdup("{\"sessionId\":\"cusa13795-session\"}");
     }
     /* GET /v1/sessions/<id> */
@@ -875,6 +1214,7 @@ static char *get_webapi_response_for_req(const WebApiReq *req) {
             si++;
         }
         sid[si] = '\0';
+        invite_session_taken(sid);
         return generate_session_info_json(sid);
     }
     /* generic /v1/sessions query */

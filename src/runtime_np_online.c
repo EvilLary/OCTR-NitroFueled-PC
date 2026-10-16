@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #define ORBIS_OK 0
 #define NP_SIGNED_OUT ((int32_t)0x80550006)
@@ -153,50 +156,109 @@ static uint64_t get_online_account_id(void) {
     return runtime_np_calculate_account_id(name);
 }
 
-static char s_friends_csv[1024] = {0};
-static int s_friends_loaded = 0;
+/* Friends: BB_ONLINE_FRIENDS (fixed for the session) plus bbport.ini's online_friends=, read
+ * again whenever the file changes. The launcher adds the player who sent a Discord invite to
+ * that line, so a game that is already running lists them at its next friend-list refresh.
+ * Readers get a pointer to a complete list: a new list is built in the other buffer and then
+ * published, never written over the one being read. */
+#include <pthread.h>
+#include <sys/stat.h>
 
-static void load_friends_if_needed(void) {
-    if (s_friends_loaded) return;
-    s_friends_loaded = 1;
-    const char *env_f = getenv("BB_ONLINE_FRIENDS");
-    if (env_f && *env_f) {
-        strncpy(s_friends_csv, env_f, sizeof(s_friends_csv) - 1);
-        s_friends_csv[sizeof(s_friends_csv) - 1] = '\0';
-        return;
-    }
-    const char *cfg = getenv("BB_CONFIG");
-    if (!cfg || !*cfg) cfg = "bbport.ini";
+#ifndef _WIN32
+#define strtok_s(str, delim, ptr) strtok_r(str, delim, ptr)
+#define _strnicmp strncasecmp
+#endif
+
+/* Friends: BB_ONLINE_FRIENDS (fixed for the session) plus bbport.ini's online_friends=, read
+ * again whenever the file changes. The launcher adds the player who sent a Discord invite to
+ * that line, so a game that is already running lists them at its next friend-list refresh.
+ * Readers get a pointer to a complete list: a new list is built in the other buffer and then
+ * published, never written over the one being read. */
+static char s_friends_buf[2][2048];
+static volatile int s_friends_cur = 0;
+static uint64_t s_friends_stamp = ~0ULL;  /* last write time and size of the file */
+static pthread_mutex_t s_friends_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void read_ini_friends(const char *cfg, char *out, size_t out_size) {
+    out[0] = '\0';
     FILE *f = fopen(cfg, "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof(line), f)) {
-            char *p = line;
-            while (*p == ' ' || *p == '\t') p++;
-            if (strncmp(p, "online_friends", 14) == 0) {
-                p += 14;
-                while (*p == ' ' || *p == '\t') p++;
-                if (*p == '=') {
-                    p++;
-                    while (*p == ' ' || *p == '\t') p++;
-                    char *end = p + strlen(p);
-                    while (end > p && (*(end - 1) == '\r' || *(end - 1) == '\n' || *(end - 1) == ' ' || *(end - 1) == '\t')) {
-                        end--;
-                    }
-                    *end = '\0';
-                    strncpy(s_friends_csv, p, sizeof(s_friends_csv) - 1);
-                    s_friends_csv[sizeof(s_friends_csv) - 1] = '\0';
-                    break;
-                }
-            }
+    if (!f) return;
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        char *p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "online_friends", 14) != 0) continue;
+        p += 14;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '=') continue;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        char *end = p + strlen(p);
+        while (end > p && (end[-1] == '\r' || end[-1] == '\n' || end[-1] == ' ' || end[-1] == '\t')) end--;
+        *end = '\0';
+        snprintf(out, out_size, "%s", p);
+        break;
+    }
+    fclose(f);
+}
+
+/* Appends the comma-separated names of src to dst, skipping blanks and case-insensitive repeats. */
+static void merge_friends(char *dst, size_t dst_size, const char *src) {
+    char copy[2048];
+    snprintf(copy, sizeof(copy), "%s", src ? src : "");
+    char *ctx = NULL;
+    for (char *tok = strtok_s(copy, ",", &ctx); tok; tok = strtok_s(NULL, ",", &ctx)) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        char *end = tok + strlen(tok);
+        while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        *end = '\0';
+        if (!*tok) continue;
+        int dup = 0;
+        size_t len = strlen(tok);
+        for (const char *p = dst; *p && !dup;) {
+            const char *comma = strchr(p, ',');
+            size_t n = comma ? (size_t)(comma - p) : strlen(p);
+            dup = n == len && _strnicmp(p, tok, len) == 0;
+            p = comma ? comma + 1 : p + n;
         }
-        fclose(f);
+        if (dup) continue;
+        size_t used = strlen(dst);
+        if (used + len + 2 >= dst_size) break;
+        if (used) dst[used++] = ',';
+        memcpy(dst + used, tok, len + 1);
     }
 }
 
 const char *runtime_np_get_friends_csv(void) {
-    load_friends_if_needed();
-    return s_friends_csv;
+    const char *cfg = getenv("BB_CONFIG");
+    if (!cfg || !*cfg) cfg = "bbport.ini";
+    uint64_t stamp = 0;
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExA(cfg, GetFileExInfoStandard, &fa)) {
+        stamp = (((uint64_t)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime) ^
+                ((uint64_t)fa.nFileSizeLow << 1);
+    }
+#else
+    struct stat st;
+    if (stat(cfg, &st) == 0) {
+        stamp = ((uint64_t)st.st_mtime << 32) ^ (uint64_t)st.st_size;
+    }
+#endif
+    pthread_mutex_lock(&s_friends_lock);
+    if (stamp != s_friends_stamp) {
+        s_friends_stamp = stamp;
+        char from_ini[1024];
+        read_ini_friends(cfg, from_ini, sizeof(from_ini));
+        char *next = s_friends_buf[s_friends_cur ^ 1];
+        next[0] = '\0';
+        merge_friends(next, sizeof(s_friends_buf[0]), getenv("BB_ONLINE_FRIENDS"));
+        merge_friends(next, sizeof(s_friends_buf[0]), from_ini);
+        s_friends_cur ^= 1;
+    }
+    const char *csv = s_friends_buf[s_friends_cur];
+    pthread_mutex_unlock(&s_friends_lock);
+    return csv;
 }
 
 int32_t runtime_np_get_state(int32_t user, int32_t *state) {

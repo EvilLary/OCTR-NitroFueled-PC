@@ -1,11 +1,43 @@
 #ifndef RUNTIME_NET_H
 #define RUNTIME_NET_H
 
+#ifndef _WIN32
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE 1
+#endif
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+typedef int NativeSockLen;
+typedef int socklen_t;
+#else
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <strings.h>
+#include <sys/ioctl.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+typedef int SOCKET;
+typedef socklen_t NativeSockLen;
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
+#define closesocket close
+#define ioctlsocket ioctl
+#define WSAGetLastError() errno
+#define WSAEADDRINUSE EADDRINUSE
+#define WSAEINPROGRESS EINPROGRESS
+#define WSAEWOULDBLOCK EWOULDBLOCK
+#define _stricmp strcasecmp
+#define _strnicmp strncasecmp
 #endif
 
 #ifdef __cplusplus

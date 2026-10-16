@@ -11,9 +11,12 @@ previous process to end first.
 Works from the MSYS2 CLANG64 Python or a python.org Python.
 """
 import ctypes
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import sys
@@ -132,6 +135,58 @@ def apply_render_res(env, config):
     say(f'Internal resolution: {plan["label"]} ({path} rendering path)')
 
 
+# The server derives the player's ID from the nickname, so everyone left on a shared default
+# name was the same player online (one wallet, and matchmaking evicting each other). These names
+# are refused online; the launcher asks for a real one before it starts the game.
+RESERVED_NICKS = {'ryupc', 'ryunet', 'player', 'jugador', 'guest'}
+OFFLINE_NAME = 'Player'
+
+
+def nick_ok(name):
+    return (3 <= len(name) <= 16 and all(c.isascii() and (c.isalnum() or c in '_-') for c in name)
+            and name.lower() not in RESERVED_NICKS)
+
+
+def online_key(data):
+    """This installation's secret: the server lets the first key to use a nickname keep it, so
+    nobody else can play under it. Created once, next to run.py; the launcher reads the same
+    file. Copying the folder to another PC keeps the nicknames; losing the file loses them."""
+    path = Path(data) / 'ryunet_online.key'
+    # A second copy outside the game folder (as the launcher keeps it), so that a deleted, moved
+    # or re-downloaded folder on the same PC keeps the nicknames.
+    appdata = os.environ.get('APPDATA')
+    backup = Path(appdata) / 'CTR-NitroFueled-PC' / 'ryunet_online.key' if appdata else None
+
+    def read(p):
+        try:
+            k = p.read_text(encoding='ascii', errors='replace').strip().lower() if p else ''
+        except OSError:
+            return ''
+        return k if len(k) == 64 and all(c in '0123456789abcdef' for c in k) else ''
+
+    key = read(path) or read(backup) or secrets.token_hex(32)
+    if read(path) != key:
+        try:
+            path.write_text(key + '\n', encoding='ascii')
+        except OSError as e:
+            say(f'Could not save the online key ({e}): the nickname cannot be kept for this installation.')
+            return ''
+    if backup and not read(backup):
+        try:
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_text(key + '\n', encoding='ascii')
+        except OSError:
+            pass
+    return key
+
+
+def server_key(key, host):
+    """What one server sees of the key: HMAC-SHA256(key, host). Each server gets a different
+    value, so a server you try (or one an invite points to) cannot reuse it on another to take
+    your nicknames. The launcher derives it the same way for its nickname check."""
+    return hmac.new(bytes.fromhex(key), host.strip().lower().encode('utf-8'), hashlib.sha256).hexdigest()
+
+
 def setup_online(env, config, data):
     ini_values = {}
     try:
@@ -142,11 +197,15 @@ def setup_online(env, config, data):
     except OSError:
         pass
 
-    name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', 'RyuPC')))
-    if name:
-        env['BB_USER_NAME'] = name
-
+    name = env.get('BB_ONLINE_NAME', ini_values.get('online_name', ini_values.get('user_name', ''))).strip()
     online = env.get('BB_ONLINE', ini_values.get('online', '0'))
+    if online == '1' and not nick_ok(name):
+        fail('Online play needs your own nickname: 3 to 16 letters, digits, _ or -, and not a default '
+             'name like RyuPC. Set it in the launcher (Online tab) or as online_name= in bbport.ini.\n'
+             'El juego online necesita tu propio apodo: de 3 a 16 letras, números, _ o -, y no un nombre '
+             'por defecto como RyuPC. Ponlo en el launcher (pestaña Online) o como online_name= en bbport.ini.')
+    env['BB_USER_NAME'] = name or OFFLINE_NAME
+
     if online != '1':
         return
 
@@ -165,6 +224,15 @@ def setup_online(env, config, data):
 
     env['BB_ONLINE_SERVER'] = host
     env['BB_ONLINE_NAME'] = name
+    key = online_key(data)
+    if key:
+        env['BB_ONLINE_KEY'] = server_key(key, host)
+    # online_inventory=save: keep the Pit Stop items of this save (a "100%" save) online
+    # instead of the ones bought on the server, which are tied to the nickname.
+    if env.get('BB_ONLINE_INVENTORY', ini_values.get('online_inventory', 'server')).strip().lower() == 'save':
+        env['BB_ONLINE_INVENTORY'] = 'save'
+    else:
+        env.pop('BB_ONLINE_INVENTORY', None)
     account_id = env.get('BB_ONLINE_ACCOUNT_ID', ini_values.get('online_account_id', ''))
     if account_id:
         env['BB_ONLINE_ACCOUNT_ID'] = account_id
@@ -271,7 +339,7 @@ def main():
         say(f'Log: {logs / (stamp + ".log")}')
     else:
         user_name = env.get('BB_USER_NAME', env.get('BB_ONLINE_NAME', ''))
-        log_name = f'last_run_{user_name}.log' if user_name and user_name != 'RyuPC' else 'last_run.log'
+        log_name = f'last_run_{user_name}.log' if user_name and user_name != OFFLINE_NAME else 'last_run.log'
         try:
             LOG = open(data / log_name, 'a' if restarted else 'w', encoding='utf-8', errors='replace')
         except OSError:

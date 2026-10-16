@@ -73,6 +73,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.fullscreen = i != 0;
     } else if (key == "borderless") {
         v.borderless = i != 0;
+    } else if (key == "volume") {
+        v.volume = std::clamp(i, 0, 200);
     } else if (key == "menu_pos") {
         float x = -1.0f, y = -1.0f;
         if (std::sscanf(value.c_str(), "%f,%f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f &&
@@ -322,6 +324,7 @@ void Save() {
     put("msaa", flag(v.msaa));
     put("fullscreen", flag(v.fullscreen));
     put("borderless", flag(v.borderless));
+    put("volume", std::to_string(v.volume.load()));
     put("fsr4_auto_exposure", flag(v.fsr4_auto_exposure));
     put("fsr4_invert_jitter", flag(v.fsr4_invert_jitter));
     // Read by patches.py at start.

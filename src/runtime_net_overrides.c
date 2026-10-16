@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifndef _WIN32
+#include <strings.h>
+#define _stricmp strcasecmp
+#endif
 
 #define MAX_OVERRIDES 64
 #define MAX_HOST_LEN 128
