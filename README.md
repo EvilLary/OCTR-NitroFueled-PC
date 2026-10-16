@@ -2,16 +2,21 @@
   <img src="docs/images/logo.png" alt="CTR Nitro-Fueled PC" width="360">
 </p>
 
-# CTR-NitroFueled-PC
+# OCTR: CTR Nitro-Fueled PC, online
 
-**Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11.**
+**Crash Team Racing: Nitro-Fueled (PS4, CUSA13795 v1.21) running natively on Windows 10/11 and
+Linux, with online play on a community server.**
 
-This is a Windows fork of [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire), the native
-Linux port of the game by T3CHNOLOG1C. The game's own x86-64 code runs directly on the CPU, a
-small runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 translates
-the PS4 GPU work to Vulkan. This fork adds the Windows layer (loader, memory, TLS, exceptions,
-files, timers) from Supermedo's Windows port of bbport, plus the fixes SacredFire needed on top
-of it: see [packaging/windows/README.md](packaging/windows/README.md).
+This is the online fork of [GetLostIn's CTR-NitroFueled-PC](https://github.com/GetLostIn/CTR-NitroFueled-PC),
+the Windows build of [SacredFire](https://github.com/T3CHNOLOG1C/SacredFire), the native Linux
+port of the game by T3CHNOLOG1C. The game's own x86-64 code runs directly on the CPU, a small
+runtime replaces the PS4 system libraries, and a renderer derived from shadPS4 translates the PS4
+GPU work to Vulkan. The Windows layer (loader, memory, TLS, exceptions, files, timers) comes from
+Supermedo's Windows port of bbport: see [packaging/windows/README.md](packaging/windows/README.md).
+
+On top of that, this fork adds **online play** (see [Online](#online) below): public races,
+private rooms, groups, friends and the Pit Stop through the RyuNET server, with your own
+nickname, Discord account linking and Discord invites.
 
 > **No game files are included.** You need your own dump of the game and its 1.21 update.
 > Both builds of the 1.21 update work: the one for firmware 5.05 (the reference) and the one for
@@ -32,6 +37,14 @@ in the background with the experimental switch.
 
 | Release | What it brought |
 |---|---|
+| [v0.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5) | Your own online nickname, linked to your Discord account and recoverable on any PC; Discord invites that join a private room directly; Discord presence; game volume (0-200%); keyboard as a split-screen player; optional "Unlock Everything" patch; Pit Stop items from the server or from your save; players on the same network can join each other; fixes for error codes 3 and 23; first Linux AppImage of this fork |
+| [v0.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.4) | Private matches and groups; the in-game friends list |
+| [v0.3 online](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.3) | First online build: matchmaking, lobbies and the Pit Stop on the RyuNET server; Online section in the launcher (server and nickname); hostnames for the server; bundled Python 3.14 |
+
+Earlier releases, from [GetLostIn's repository](https://github.com/GetLostIn/CTR-NitroFueled-PC):
+
+| Release | What it brought |
+|---|---|
 | [v0.3](https://github.com/GetLostIn/CTR-NitroFueled-PC/releases/tag/v0.3) | Internal resolution 480p to native 4K (the game's own render scale; replaces the PS4 Pro switch); one *Upscaling* list: AMD FSR 1, AMD FSR 3.1 or NVIDIA DLSS (temporal, experimental) with DLSS quality modes, output and model (Transformer/CNN); game languages of this build (English, Latin American Spanish, French, Brazilian Portuguese); PS4 PKG Tool dumps (Image0 + Sc0); fullscreen switch in game fixed |
 | [v0.2.1](https://github.com/GetLostIn/CTR-NitroFueled-PC/releases/tag/v0.2.1) | The 1.21 update built for firmware 6.72+ is accepted (patches found by signature); keyboard page in the launcher to rebind keys |
 | [v0.2.0](https://github.com/GetLostIn/CTR-NitroFueled-PC/releases/tag/v0.2.0) | Launcher (`CTR-NitroFueled-PC.exe`): game setup with hard-link merge, settings, patches, save backups and imports, optional DLC; bundled Python; the project's icon |
@@ -39,11 +52,52 @@ in the background with the experimental switch.
 
 ### Quick start (Windows)
 
-**Easiest: the portable build.** Download `CTR-NitroFueled-PC-portable-windows.zip` from
-[Releases](https://github.com/GetLostIn/CTR-NitroFueled-PC/releases), unzip it anywhere and open
-**`CTR-NitroFueled-PC.exe`**, the launcher: choose your `CUSA13795` (base game) and
+**Easiest: the portable build.** Download `CTR-NitroFueled-PC-portable-<version>-windows.zip`
+from [Releases](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases), unzip it anywhere and
+open **`CTR-NitroFueled-PC.exe`**, the launcher: choose your `CUSA13795` (base game) and
 `CUSA13795-patch` (update 1.21) folders, press *Prepare the game* once (it merges them with hard
 links, no extra disk space) and then *Play*. Python is bundled; you only need a Vulkan 1.3 GPU.
+
+**Updating:** unzip the new version over your folder to keep your settings, saves and nickname
+key, or unzip it into a new folder and copy `user\`, `bbport.ini`, `launcher.ini` and
+`ryunet_online.key` across.
+
+**Linux and Steam Deck:** `SacredFire-x86_64.AppImage` from the same Releases page (see
+[AppImage](#appimage-steam-deck) below). Data, saves and the nickname key live in
+`~/.local/share/sacredfire`.
+
+### Online
+
+Online is on by default and connects to the community server **octr.ryu7w7.xyz**
+([RyuNET](https://github.com/Ryu7w7/ryunet-demonware-ctr), a Demonware server written for this
+game). From the game's own menus you can:
+
+- race in **public matches** with other players, alone or with your **group**;
+- create **private rooms** and invite your friends;
+- see your **friends list** in the game;
+- buy items in the **Pit Stop**: with the items bought on the server, or with the ones already
+  unlocked in your own save (launcher: Online tab).
+
+**Your nickname.** Each player needs their own nickname (3 to 16 letters, digits, `_` or `-`).
+Shared default names (RyuPC, Player, Jugador...) are refused. The first installation that plays
+with a nickname keeps it, through the key in `ryunet_online.key` (copied to
+`%APPDATA%\CTR-NitroFueled-PC`): **never share that file.**
+
+**Discord** (Windows launcher, Online tab):
+
+- **Link with Discord** ties your nickname to your Discord account. *Recover with Discord* gets
+  it back on any PC or after reinstalling. Linked nicknames never expire; unlinked ones that
+  nobody uses for 60 days become free again.
+- **Presence and invites:** with Discord open, your profile shows what you are playing, and an
+  invite sent from Discord drops the friend who accepts it straight into your private room.
+
+**Playing offline:** turn online off in the launcher's Online tab, or set `BB_ONLINE=0`. The
+server address can be changed there too, to play on your own RyuNET server.
+
+**Connection problems:** the game connects players directly to each other (UDP port 3074), as
+on the PS4. Some home connections (strict NAT, mobile data, carrier-grade NAT) cannot reach some
+other players. If a match keeps failing with the same people, enabling UPnP on your router or
+forwarding UDP 3074 to your PC helps.
 
 **Picture** (launcher: Settings > Display; in game: Insert):
 
@@ -86,7 +140,7 @@ choose a folder, the launcher says in green or red what it found.
 
 Both builds of the 1.21 update work (for firmware 5.05 and for 6.72+). If something fails, the
 launcher's log and `user\last_run.log` say which file is missing; attach `last_run.log` when you
-[open an issue](https://github.com/GetLostIn/CTR-NitroFueled-PC/issues).
+[open an issue](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/issues).
 
 **Or build it yourself:**
 
@@ -119,6 +173,9 @@ This fork stands on the work of:
   and GeForce RTX are trademarks and/or registered trademarks of NVIDIA Corporation. The GPL
   program contains no NVIDIA code: it loads the separate bridge DLL when present.
 - Windows port of SacredFire: [GetLostIn](https://github.com/GetLostIn), with Claude (Anthropic).
+- Online (this fork) and the RyuNET server: [Ryu7w7](https://github.com/Ryu7w7), with Claude (Anthropic).
+- **[leomoon](https://github.com/leomoon)**: Linux crash diagnostics.
+- **Camiloop**: the "Unlock Everything" patch.
 
 Licensed under the GNU GPL v2 or later, as SacredFire, bbport and shadPS4. The rest of this
 README is SacredFire's own (Linux, Steam Deck).
@@ -299,7 +356,7 @@ can find the cause. **No game files** in issues or pull requests. See
 
 - Races with the 60 FPS patch reach 37–45 FPS on the Steam Deck: the port's GPU command thread
   is the limit at ~1400 draws per frame ([docs/sacredfire/08-patches.md](docs/sacredfire/08-patches.md)).
-- Online features are stubbed; the game runs offline.
+- Online features are stubbed in SacredFire; this fork plays online (see [Online](#online)).
 - Windows: native build, from source only for now, without the GTK launcher and without the
   PC memory model ([packaging/windows/README.md](packaging/windows/README.md)).
 - macOS is not supported ([docs/sacredfire/10-other-platforms.md](docs/sacredfire/10-other-platforms.md)).
