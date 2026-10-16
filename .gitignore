@@ -5,6 +5,9 @@ user/
 bbport.ini
 pgo/
 *.png
+!/art/ctr-hero.png
+!/art/ctr-logo.png
+!/art/ctr-menu-background.png
 last_run.log
 dist/
 packaging/runtime-paths.nix
