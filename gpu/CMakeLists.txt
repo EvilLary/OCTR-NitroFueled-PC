@@ -254,7 +254,7 @@ if (WIN32)
     target_include_directories(ctr-launcher PRIVATE third_party/imgui third_party/imgui/backends)
     target_compile_definitions(ctr-launcher PRIVATE UNICODE _UNICODE)
     target_link_options(ctr-launcher PRIVATE -static -municode -s)
-    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
+    target_link_libraries(ctr-launcher PRIVATE d3d11 dxgi d3dcompiler dwmapi windowscodecs ole32 shell32 uuid winhttp bcrypt advapi32 ws2_32)
     set_target_properties(ctr-launcher PROPERTIES OUTPUT_NAME CTR-NitroFueled-PC INTERPROCEDURAL_OPTIMIZATION OFF)
     # Discord presence and invites against a fake Discord pipe; never touches the real one.
     add_executable(discord-presence-test EXCLUDE_FROM_ALL ../tests/test_discord_presence.cpp

@@ -11,7 +11,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <windowsx.h>
 #include <d3d11.h>
+#include <dwmapi.h>
+#include <wincodec.h>
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <shlobj.h>
@@ -23,6 +26,8 @@
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <cmath>
+#include <cwctype>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -44,6 +49,7 @@
 
 #include "discord_link.h"
 #include "discord_presence.h"
+#include "launcher_locales.h"
 
 namespace fs = std::filesystem;
 
@@ -54,6 +60,18 @@ constexpr const char* kUpdateVersion = "01.21";
 constexpr const char* kRepoUrl = "https://github.com/GetLostIn/CTR-NitroFueled-PC";
 // The 1.21 update alone is about 8.5 GB; base game + update is much larger.
 constexpr std::uintmax_t kCompleteGameMinBytes = 10ull << 30;
+
+struct LauncherArtwork {
+    ID3D11ShaderResourceView* texture = nullptr;
+    UINT width = 0;
+    UINT height = 0;
+};
+LauncherArtwork g_hero_art;
+LauncherArtwork g_logo_art;
+LauncherArtwork g_menu_background;
+RECT g_titlebar_drag{};
+float g_ui_scale = 1.0f;
+extern ID3D11Device* g_device;
 
 // ---------------------------------------------------------------------------------------------
 // Text helpers
@@ -117,8 +135,42 @@ const ImVec4 kGrey{0.65f, 0.65f, 0.68f, 1.0f};
 // ---------------------------------------------------------------------------------------------
 // Language: Spanish or English, chosen in the launcher (default: Windows' language).
 
-bool g_spanish = true;
-const char* T(const char* es, const char* en) { return g_spanish ? es : en; }
+bool g_spanish = false;
+std::string g_language = "auto";
+std::string g_active_locale = "en";
+
+std::string DetectWindowsLocale() {
+    wchar_t name[LOCALE_NAME_MAX_LENGTH]{};
+    if (!GetUserDefaultLocaleName(name, LOCALE_NAME_MAX_LENGTH)) return "en";
+    std::wstring locale(name);
+    std::transform(locale.begin(), locale.end(), locale.begin(), [](wchar_t c) { return wchar_t(towlower(c)); });
+    if (locale.rfind(L"pt", 0) == 0) return "pt_BR";
+    if (locale.rfind(L"es", 0) == 0) return "es";
+    if (locale.rfind(L"fr", 0) == 0) return "fr";
+    if (locale.rfind(L"de", 0) == 0) return "de";
+    if (locale.rfind(L"it", 0) == 0) return "it";
+    if (locale.rfind(L"ja", 0) == 0) return "ja";
+    if (locale.rfind(L"zh", 0) == 0) return "zh_CN";
+    if (locale.rfind(L"ru", 0) == 0) return "ru";
+    return "en";
+}
+
+void ApplyLauncherLanguage() {
+    g_active_locale = g_language == "auto" ? DetectWindowsLocale() : g_language;
+    g_spanish = g_active_locale == "es";
+}
+
+const char* T(const char* es, const char* en) {
+    if (g_active_locale == "es") return es;
+    if (g_active_locale == "en") return en;
+    const auto& all = GeneratedLocales();
+    const auto language = all.find(g_active_locale);
+    if (language != all.end()) {
+        const auto value = language->second.find(en);
+        if (value != language->second.end()) return value->second.c_str();
+    }
+    return en;
+}
 
 // ---------------------------------------------------------------------------------------------
 // key=value files, edited in place: comments, order and unknown keys are kept.
@@ -572,6 +624,7 @@ enum class Job { None, Merge, Check, Play };
 
 struct App {
     HWND hwnd = nullptr;
+    int active_page = 0;
     fs::path root, bin;
     std::string version;
     std::optional<Python> python;
@@ -646,7 +699,7 @@ void SaveLauncher() {
     a.launcher.Set("game_dir", PathText(a.game_dir));
     a.launcher.Set("base_dir", PathText(a.base_dir));
     a.launcher.Set("update_dir", PathText(a.update_dir));
-    a.launcher.Set("ui_language", g_spanish ? "es" : "en");
+    a.launcher.Set("ui_language", g_language);
     if (!a.launcher.Save(LauncherIni(), "# CTR-NitroFueled-PC launcher")) {
         a.notice = T("No se pudo guardar launcher.ini.", "Could not save launcher.ini.");
     }
@@ -2203,17 +2256,19 @@ void PlayTab() {
     ImGui::Spacing();
     const float play_height = ImGui::GetFontSize() * 3.0f;
     if (a.game_running) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.16f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.50f, 0.14f, 0.22f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.68f, 0.20f, 0.28f, 1.0f));
         if (ImGui::Button(T("Cerrar el juego", "Stop the game"), ImVec2(-FLT_MIN, play_height))) StopGame();
-        ImGui::PopStyleColor();
+        ImGui::PopStyleColor(2);
     } else {
         ImGui::BeginDisabled(!ready || busy || !a.python);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.45f, 0.20f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.58f, 0.26f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.74f, 0.94f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.87f, 0.98f, 1.0f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.02f, 0.18f, 0.34f, 1.0f));
         ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5f);
         if (ImGui::Button(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height))) PressPlay();
         ImGui::PopFont();
-        ImGui::PopStyleColor(2);
+        ImGui::PopStyleColor(3);
         ImGui::EndDisabled();
     }
 
@@ -4408,13 +4463,14 @@ void ToolsTab() {
     ImGui::EndDisabled();
 
     ImGui::SeparatorText(T("Idioma del launcher", "Launcher language"));
-    if (ImGui::RadioButton("Español", g_spanish)) {
-        g_spanish = true;
-        SaveLauncher();
-    }
-    ImGui::SameLine();
-    if (ImGui::RadioButton("English", !g_spanish)) {
-        g_spanish = false;
+    const char* language_names[] = {"Auto (Windows)", "English", "Español", "Português (Brasil)", "Français",
+                                    "Deutsch", "Italiano", "日本語", "简体中文", "Русский"};
+    const char* language_codes[] = {"auto", "en", "es", "pt_BR", "fr", "de", "it", "ja", "zh_CN", "ru"};
+    int selected_language = 0;
+    for (int i = 0; i < 10; ++i) if (g_language == language_codes[i]) selected_language = i;
+    if (ImGui::Combo(T("Idioma", "Language"), &selected_language, language_names, 10)) {
+        g_language = language_codes[selected_language];
+        ApplyLauncherLanguage();
         SaveLauncher();
     }
 
@@ -4457,6 +4513,199 @@ void ClearShaderCache() {
                             T(" archivos).", " files).");
 }
 
+void HeroHeader() {
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float height = 270.0f;
+    const ImVec2 end{origin.x + width, origin.y + height};
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    if (g_hero_art.texture) {
+        const float image_aspect = float(g_hero_art.width) / float(g_hero_art.height);
+        const float view_aspect = width / height;
+        ImVec2 uv0{0.0f, 0.0f}, uv1{1.0f, 1.0f};
+        if (image_aspect < view_aspect) {
+            const float visible = image_aspect / view_aspect;
+            uv0.y = (1.0f - visible) * 0.5f;
+            uv1.y = 1.0f - uv0.y;
+        } else {
+            const float visible = view_aspect / image_aspect;
+            uv0.x = (1.0f - visible) * 0.5f;
+            uv1.x = 1.0f - uv0.x;
+        }
+        draw->AddImage((ImTextureID)(intptr_t)g_hero_art.texture, origin, end, uv0, uv1);
+    } else {
+        draw->AddRectFilled(origin, end, IM_COL32(48, 32, 20, 255));
+    }
+    if (g_logo_art.texture) {
+        const float max_w = std::min(width * 0.34f, 390.0f);
+        const float max_h = height * 0.78f;
+        const float aspect = float(g_logo_art.width) / float(g_logo_art.height);
+        float logo_w = max_w, logo_h = logo_w / aspect;
+        if (logo_h > max_h) { logo_h = max_h; logo_w = logo_h * aspect; }
+        const ImVec2 lo{origin.x + 28.0f, origin.y + (height - logo_h) * 0.5f};
+        const ImVec2 hi{lo.x + logo_w, lo.y + logo_h};
+        draw->AddImage((ImTextureID)(intptr_t)g_logo_art.texture, lo, hi);
+    }
+    draw->AddRectFilled(ImVec2(origin.x, end.y - 4.0f), end, IM_COL32(238, 169, 48, 255));
+    ImGui::Dummy(ImVec2(width, height));
+}
+
+void WindowBar(float width) {
+    const float height = 40.0f;
+    ImGui::SetCursorPos(ImVec2(0, 0));
+    const ImVec2 p = ImGui::GetWindowPos();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilled(p, ImVec2(p.x + width, p.y + height), IM_COL32(7, 72, 145, 255));
+    draw->AddRectFilled(ImVec2(p.x, p.y + height - 1), ImVec2(p.x + width, p.y + height),
+                        IM_COL32(44, 166, 228, 255));
+    const float bw = 42.0f, bh = 30.0f, gap = 3.0f;
+    const float left = width - 3.0f * bw - 2.0f * gap - 8.0f;
+    auto button = [&](const char* id, int kind) {
+        ImGui::SetCursorPos(ImVec2(left + kind * (bw + gap), 5.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.04f, 0.25f, 0.47f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.08f, 0.40f, 0.66f, 1));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.55f, 0.78f, 1));
+        const bool clicked = ImGui::Button(id, ImVec2(bw, bh));
+        ImGui::PopStyleColor(3);
+        const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+        const ImVec2 c{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+        const ImU32 ink = IM_COL32(255, 234, 198, 255);
+        if (kind == 0) draw->AddLine(ImVec2(c.x - 5, c.y), ImVec2(c.x + 5, c.y), ink, 1.6f);
+        else if (kind == 1) draw->AddRect(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), ink, 0, 0, 1.4f);
+        else {
+            draw->AddLine(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), ink, 1.6f);
+            draw->AddLine(ImVec2(c.x + 5, c.y - 5), ImVec2(c.x - 5, c.y + 5), ink, 1.6f);
+        }
+        return clicked;
+    };
+    if (button("##minimize", 0)) ShowWindow(g_app.hwnd, SW_MINIMIZE);
+    if (button("##maximize", 1)) ShowWindow(g_app.hwnd, IsZoomed(g_app.hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+    if (button("##close", 2)) SendMessageW(g_app.hwnd, WM_CLOSE, 0, 0);
+    RECT client{};
+    GetClientRect(g_app.hwnd, &client);
+    g_titlebar_drag = RECT{0, 0, std::max<LONG>(0, client.right - LONG(3 * bw + 2 * gap + 8)), LONG(height)};
+    ImGui::SetCursorPos(ImVec2(14, height + 10));
+}
+
+bool LoadArtworkFile(const fs::path& path, LauncherArtwork& artwork) {
+    if (!g_device || !fs::is_regular_file(path)) return false;
+    IWICImagingFactory* factory = nullptr;
+    IWICBitmapDecoder* decoder = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* converter = nullptr;
+    ID3D11Texture2D* texture = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                                WICDecodeMetadataCacheOnLoad, &decoder);
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (SUCCEEDED(hr)) hr = factory->CreateFormatConverter(&converter);
+    if (SUCCEEDED(hr)) hr = converter->Initialize(frame, GUID_WICPixelFormat32bppRGBA,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    UINT w = 0, h = 0;
+    if (SUCCEEDED(hr)) hr = converter->GetSize(&w, &h);
+    std::vector<BYTE> pixels(size_t(w) * h * 4);
+    if (SUCCEEDED(hr)) hr = converter->CopyPixels(nullptr, w * 4, UINT(pixels.size()), pixels.data());
+    if (SUCCEEDED(hr)) {
+        D3D11_TEXTURE2D_DESC td{}; td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd{pixels.data(), w * 4, 0};
+        hr = g_device->CreateTexture2D(&td, &sd, &texture);
+    }
+    if (SUCCEEDED(hr)) hr = g_device->CreateShaderResourceView(texture, nullptr, &artwork.texture);
+    if (texture) texture->Release(); if (converter) converter->Release(); if (frame) frame->Release();
+    if (decoder) decoder->Release(); if (factory) factory->Release();
+    if (FAILED(hr)) { artwork = {}; return false; }
+    artwork.width = w; artwork.height = h; return true;
+}
+
+void LoadArtwork() {
+    const fs::path art = g_app.root / L"art";
+    LoadArtworkFile(art / L"ctr-hero.png", g_hero_art);
+    LoadArtworkFile(art / L"ctr-logo.png", g_logo_art);
+    LoadArtworkFile(art / L"ctr-menu-background.png", g_menu_background);
+}
+
+void ReleaseArtwork() {
+    for (auto* a : {&g_hero_art, &g_logo_art, &g_menu_background}) {
+        if (a->texture) a->texture->Release();
+        *a = {};
+    }
+}
+
+void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s) {
+    const ImU32 navy = IM_COL32(6, 39, 89, 255);
+    auto line = [&](ImVec2 a, ImVec2 b, float t = 2.2f) { d->AddLine(a, b, navy, t * s); d->AddLine(a, b, ink, t * s * 0.58f); };
+    if (id == 0) { // checkered flag / race
+        line({c.x-7*s,c.y+8*s},{c.x-7*s,c.y-8*s},2.5f); d->AddRectFilled({c.x-5*s,c.y-8*s},{c.x+8*s,c.y+1*s},ink,1.5f*s);
+        d->AddRectFilled({c.x-2*s,c.y-8*s},{c.x+1*s,c.y-3.5f*s},navy); d->AddRectFilled({c.x+4*s,c.y-3.5f*s},{c.x+7*s,c.y+1*s},navy);
+    } else if (id == 1) { // gear
+        d->AddCircleFilled(c,7*s,navy,12); d->AddCircleFilled(c,5.5f*s,ink,12); d->AddCircleFilled(c,2*s,navy,12);
+        for (int i=0;i<8;++i) { float a=float(i)*0.785398f; ImVec2 p{c.x+7*s*std::cos(a),c.y+7*s*std::sin(a)}; d->AddCircleFilled(p,1.6f*s,ink,8); }
+    } else if (id == 2) { // wireless
+        d->PathArcTo({c.x,c.y+5*s},8*s,3.85f,5.58f,18); d->PathStroke(navy,0,4*s); d->PathArcTo({c.x,c.y+5*s},8*s,3.85f,5.58f,18); d->PathStroke(ink,0,2.2f*s);
+        d->PathArcTo({c.x,c.y+5*s},5*s,3.85f,5.58f,18); d->PathStroke(ink,0,2*s); d->AddCircleFilled({c.x,c.y+5*s},1.7f*s,ink,10);
+    } else if (id == 3) { // gamepad
+        d->AddRect({c.x-9*s,c.y-5*s},{c.x+9*s,c.y+6*s},navy,5*s,0,3*s); d->AddRect({c.x-8*s,c.y-4*s},{c.x+8*s,c.y+5*s},ink,4*s,0,2*s);
+        line({c.x-5*s,c.y},{c.x-1*s,c.y},2); line({c.x-3*s,c.y-2*s},{c.x-3*s,c.y+2*s},2); d->AddCircleFilled({c.x+4*s,c.y-1*s},1.4f*s,navy); d->AddCircleFilled({c.x+6*s,c.y+2*s},1.4f*s,navy);
+    } else if (id == 4) { // keyboard
+        d->AddRectFilled({c.x-9*s,c.y-6*s},{c.x+9*s,c.y+6*s},navy,2*s); d->AddRectFilled({c.x-7*s,c.y-4*s},{c.x+7*s,c.y+4*s},ink,1*s);
+        for(int r=0;r<2;++r) for(int col=0;col<5;++col) d->AddRectFilled({c.x-6*s+col*2.5f*s,c.y-3*s+r*3*s},{c.x-4.5f*s+col*2.5f*s,c.y-1.8f*s+r*3*s},navy,0.4f*s);
+    } else if (id == 5) { // patch badge
+        const ImVec2 pts[]={{c.x,c.y-9*s},{c.x+8*s,c.y-6*s},{c.x+7*s,c.y+3*s},{c.x,c.y+9*s},{c.x-7*s,c.y+3*s},{c.x-8*s,c.y-6*s}};
+        d->AddConvexPolyFilled(pts,6,navy); const ImVec2 in[]={{c.x,c.y-7*s},{c.x+6*s,c.y-4.5f*s},{c.x+5*s,c.y+2*s},{c.x,c.y+7*s},{c.x-5*s,c.y+2*s},{c.x-6*s,c.y-4.5f*s}}; d->AddConvexPolyFilled(in,6,ink);
+        line({c.x-3*s,c.y},{c.x-0.5f*s,c.y+2.5f*s},2.4f); line({c.x-0.5f*s,c.y+2.5f*s},{c.x+4*s,c.y-3*s},2.4f);
+    } else if (id == 6) { // save card
+        d->AddRectFilled({c.x-7*s,c.y-9*s},{c.x+7*s,c.y+9*s},navy,1*s); d->AddRectFilled({c.x-5.5f*s,c.y-7*s},{c.x+5.5f*s,c.y+7*s},ink,0.8f*s);
+        d->AddRectFilled({c.x-3.5f*s,c.y-6*s},{c.x+3.5f*s,c.y-2*s},navy); d->AddRectFilled({c.x-3.5f*s,c.y+1*s},{c.x+3.5f*s,c.y+5*s},navy,0.6f*s);
+    } else if (id == 7) { // crate
+        d->AddRectFilled({c.x-8*s,c.y-7*s},{c.x+8*s,c.y+7*s},navy,1*s); d->AddRectFilled({c.x-6*s,c.y-5*s},{c.x+6*s,c.y+5*s},ink,1*s);
+        d->AddRect({c.x-4*s,c.y-3*s},{c.x+4*s,c.y+3*s},navy,0,0,1.6f*s); d->AddLine({c.x-2*s,c.y+1*s},{c.x,c.y-2*s},navy,1.8f*s); d->AddLine({c.x,c.y-2*s},{c.x+2*s,c.y+1*s},navy,1.8f*s);
+    } else { // crossed tools
+        line({c.x-7*s,c.y-7*s},{c.x+7*s,c.y+7*s},3); line({c.x+7*s,c.y-7*s},{c.x-7*s,c.y+7*s},3); d->AddCircleFilled(c,2.5f*s,ink,12);
+    }
+}
+
+bool MenuEntry(int id, const char* label, bool selected, float width) {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const ImVec2 size{width, 44.0f};
+    const bool clicked = ImGui::InvisibleButton(label, size);
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 a{start.x, start.y}, b{start.x + size.x, start.y + size.y};
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const double now = ImGui::GetTime();
+    static double selected_since = 0.0;
+    static int last_selected = -1;
+    if (selected && last_selected != id) { last_selected = id; selected_since = now; }
+    const float t = selected ? std::clamp(float((now - selected_since) / 0.26), 0.0f, 1.0f) : 1.0f;
+    const float ease = 1.0f - (1.0f-t)*(1.0f-t);
+    const float slide = selected ? (1.0f-ease) * -13.0f : 0.0f;
+    ImVec2 p0{a.x+slide,a.y+4}, p1{b.x+slide-10,a.y+4}, p2{b.x+slide,a.y+size.y-4}, p3{a.x+slide+10,a.y+size.y-4};
+    const ImU32 shadow=IM_COL32(0,31,79,95), dark=hovered?IM_COL32(7,65,130,218):IM_COL32(6,55,113,178);
+    const ImVec2 sh[]={ImVec2(p0.x,p0.y+3),ImVec2(p1.x,p1.y+3),ImVec2(p2.x,p2.y+3),ImVec2(p3.x,p3.y+3)};
+    d->AddConvexPolyFilled(sh,4,shadow);
+    const ImVec2 poly[]={p0,p1,p2,p3};
+    d->AddConvexPolyFilled(poly,4,selected?IM_COL32(234,250,255,248):dark);
+    if (selected) {
+        d->AddPolyline(poly,4,IM_COL32(255,255,255,215),ImDrawFlags_Closed,1.6f);
+        d->AddRectFilled({p3.x+3,p3.y-1},{p3.x+8,p3.y+1},IM_COL32(29,211,255,255));
+        const float elapsed = float(now-selected_since);
+        if (elapsed < 0.42f) {
+            const float shine = std::clamp(elapsed / 0.42f, 0.0f, 1.0f);
+            const float sx = a.x+slide+12.0f+shine*(size.x-54.0f);
+            d->PushClipRect({p0.x,p0.y},{p2.x,p2.y},true);
+            d->AddLine({sx,p0.y+5},{sx+13,p2.y-5},IM_COL32(255,255,255,110),2.0f);
+            d->PopClipRect();
+        }
+    }
+    const ImVec2 icon{a.x+31.0f+slide,a.y+size.y*0.5f};
+    DrawMenuIcon(d,id,icon,selected?IM_COL32(9,64,112,255):IM_COL32(234,249,255,235),0.75f);
+    const ImVec2 text_size=ImGui::CalcTextSize(label);
+    const ImVec2 text{a.x+55.0f+slide,a.y+(size.y-text_size.y)*0.5f};
+    d->AddText(text,selected?IM_COL32(4,46,84,255):IM_COL32(237,249,255,245),label);
+    return clicked;
+}
+
 void Frame() {
     App& a = g_app;
     PollJobs();
@@ -4466,11 +4715,19 @@ void Frame() {
     ImGui::Begin("launcher", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.6f);
-    ImGui::TextUnformatted("CTR Nitro-Fueled PC");
-    ImGui::PopFont();
-    ImGui::SameLine();
-    ImGui::TextColored(kGrey, "%s", a.version.c_str());
+    if (g_menu_background.texture) {
+        const float wa=vp->WorkSize.x/vp->WorkSize.y;
+        const float ia=float(g_menu_background.width)/float(g_menu_background.height);
+        ImVec2 uv0{0,0},uv1{1,1};
+        if (ia>wa) { const float v=wa/ia; uv0.x=(1-v)*0.5f; uv1.x=1-uv0.x; }
+        else { const float v=ia/wa; uv0.y=(1-v)*0.5f; uv1.y=1-uv0.y; }
+        ImGui::GetWindowDrawList()->AddImage((ImTextureID)(intptr_t)g_menu_background.texture,
+                                             vp->WorkPos, ImVec2(vp->WorkPos.x + vp->WorkSize.x,
+                                                                 vp->WorkPos.y + vp->WorkSize.y),uv0,uv1);
+    }
+    const float width = ImGui::GetWindowSize().x;
+    WindowBar(width);
+    HeroHeader();
 
     if (!a.notice.empty()) {
         ImGui::TextColored(kYellow, "%s", a.notice.c_str());
@@ -4478,63 +4735,50 @@ void Frame() {
         if (ImGui::SmallButton("OK")) a.notice.clear();
     }
 
-    if (ImGui::BeginTabBar("tabs")) {
-        if (ImGui::BeginTabItem(T("Jugar", "Play"))) {
-            PlayTab();
-            ImGui::EndTabItem();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.025f, 0.19f, 0.40f, 0.78f));
+    ImGui::BeginChild("menu_body", ImVec2(0, 0), ImGuiChildFlags_None);
+    const float menu_w = 238.0f;
+    ImGui::BeginChild("menu_navigation", ImVec2(menu_w, 0), ImGuiChildFlags_None);
+    ImGui::SetCursorPos(ImVec2(18.0f, 14.0f));
+    ImGui::TextColored(ImVec4(0.76f, 0.92f, 1.0f, 0.9f), "%s", T("MENÚ PRINCIPAL", "MAIN MENU"));
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 8.0f);
+    const char* pages[] = {T("Jugar", "Play"), T("Ajustes", "Settings"), "Online", T("Mando", "Gamepad"),
+                           T("Teclado", "Keyboard"), T("Parches", "Patches"), T("Guardados", "Saves"), "DLC",
+                           T("Herramientas", "Tools")};
+    for (int i=0; i<9; ++i) {
+        ImGui::SetCursorPosX(8.0f);
+        if (MenuEntry(i, pages[i], a.active_page == i, menu_w - 16.0f)) {
+            a.active_page = i;
+            if (i != 3) g_pad_capture = -1;
+            if (i != 4) g_key_capture = -1;
         }
-        if (ImGui::BeginTabItem(T("Ajustes", "Settings"))) {
-            ImGui::BeginChild("settings");
-            SettingsTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Online")) {
-            ImGui::BeginChild("online");
-            OnlineTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(T("Mando", "Gamepad"))) {
-            ImGui::BeginChild("gamepad");
-            GamepadTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        } else if (g_pad_capture >= 0) {
-            g_pad_capture = -1;
-        }
-        if (ImGui::BeginTabItem(T("Teclado", "Keyboard"))) {
-            ImGui::BeginChild("keyboard");
-            KeyboardTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        } else if (g_key_capture >= 0) {
-            g_key_capture = -1;  // left the tab while waiting for a key
-        }
-        if (ImGui::BeginTabItem(T("Parches", "Patches"))) {
-            ImGui::BeginChild("patches");
-            PatchesTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(T("Guardados", "Saves"))) {
-            ImGui::BeginChild("saves");
-            SavesTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("DLC")) {
-            ImGui::BeginChild("dlc");
-            DlcTab();
-            ImGui::EndChild();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem(T("Herramientas", "Tools"))) {
-            ToolsTab();
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3.0f);
     }
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), ImGui::GetWindowHeight() - 38.0f));
+    ImGui::SetCursorPosX(18.0f);
+    ImGui::TextColored(ImVec4(0.77f, 0.91f, 1.0f, 0.84f), "CTR  •  %s", a.version.c_str());
+    ImGui::EndChild();
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.015f, 0.13f, 0.32f, 0.82f));
+    ImGui::BeginChild("menu_content", ImVec2(0, 0), ImGuiChildFlags_None);
+    ImGui::SetCursorPos(ImVec2(22.0f, 17.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.91f, 0.97f, 1.0f, 1.0f));
+    switch (a.active_page) {
+    case 0: PlayTab(); break;
+    case 1: SettingsTab(); break;
+    case 2: OnlineTab(); break;
+    case 3: GamepadTab(); break;
+    case 4: KeyboardTab(); break;
+    case 5: PatchesTab(); break;
+    case 6: SavesTab(); break;
+    case 7: DlcTab(); break;
+    default: ToolsTab(); break;
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
 
     SaveConfirmations();
     NickPopup();
@@ -4593,7 +4837,8 @@ void LoadState() {
     a.game.Load(GameIni());
     SyncOnlineBuffers();
     const std::string lang = a.launcher.Get("ui_language");
-    g_spanish = lang.empty() ? PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_SPANISH : lang == "es";
+    g_language = lang.empty() ? "auto" : lang;
+    ApplyLauncherLanguage();
     a.game_dir = TextPath(a.launcher.Get("game_dir"));
     a.base_dir = TextPath(a.launcher.Get("base_dir"));
     a.update_dir = TextPath(a.launcher.Get("update_dir"));
@@ -4679,6 +4924,19 @@ void CleanupDevice() {
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_NCHITTEST) {
+        POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        ScreenToClient(hwnd, &pt);
+        RECT client{}; GetClientRect(hwnd, &client);
+        if (!IsZoomed(hwnd)) {
+            const LONG edge = LONG(8.0f * g_ui_scale);
+            const bool l=pt.x<edge, r=pt.x>=client.right-edge, t=pt.y<edge, b=pt.y>=client.bottom-edge;
+            if (t&&l) return HTTOPLEFT; if (t&&r) return HTTOPRIGHT;
+            if (b&&l) return HTBOTTOMLEFT; if (b&&r) return HTBOTTOMRIGHT;
+            if (l) return HTLEFT; if (r) return HTRIGHT; if (t) return HTTOP; if (b) return HTBOTTOM;
+        }
+        return PtInRect(&g_titlebar_drag, pt) ? HTCAPTION : HTCLIENT;
+    }
     // Gamepad tab: Esc cancels capture
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && g_pad_capture >= 0) {
         if (wparam == VK_ESCAPE) {
@@ -4694,6 +4952,30 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
     }
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wparam, lparam)) return true;
     switch (msg) {
+    case WM_NCCALCSIZE:
+        if (wparam) {
+            auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lparam);
+            if (IsZoomed(hwnd)) {
+                MONITORINFO monitor{sizeof monitor};
+                if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor))
+                    params->rgrc[0] = monitor.rcWork;
+            }
+            return 0;
+        }
+        break;
+    case WM_GETMINMAXINFO: {
+        auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+        info->ptMinTrackSize.x = LONG(900.0f * g_ui_scale);
+        info->ptMinTrackSize.y = LONG(640.0f * g_ui_scale);
+        MONITORINFO monitor{sizeof monitor};
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            info->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left;
+            info->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top;
+            info->ptMaxSize.x = monitor.rcWork.right - monitor.rcWork.left;
+            info->ptMaxSize.y = monitor.rcWork.bottom - monitor.rcWork.top;
+        }
+        return 0;
+    }
     case WM_SIZE:
         if (wparam == SIZE_MINIMIZED) return 0;
         g_resize_w = LOWORD(lparam);
@@ -4800,14 +5082,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                                 GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
-    const int width = int(820 * scale), height = int(720 * scale);
+    const int width = int(1120 * scale), height = int(840 * scale);
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const int x = work.left + std::max(0, int(work.right - work.left - width) / 2);
     const int y = work.top + std::max(0, int(work.bottom - work.top - height) / 2);
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"CTR Nitro-Fueled PC", WS_OVERLAPPEDWINDOW, x, y, width, height, nullptr,
-                              nullptr, instance, nullptr);
+    g_ui_scale = scale;
+    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Crash Team Racing: Nitro-Fueled",
+                              WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU,
+                              x, y, width, height, nullptr, nullptr, instance, nullptr);
     g_app.hwnd = hwnd;
+    const BOOL dark_titlebar = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark_titlebar, sizeof(dark_titlebar));
     if (!CreateDevice(hwnd)) {
         CleanupDevice();
         MessageBoxW(nullptr, L"Direct3D 11 is not available.", L"CTR Nitro-Fueled PC", MB_ICONERROR);
@@ -4824,6 +5110,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
+    style.Colors[ImGuiCol_Text] = ImVec4(0.94f, 0.98f, 1.0f, 1.0f);
+    style.Colors[ImGuiCol_TextDisabled] = ImVec4(0.65f, 0.83f, 0.94f, 1.0f);
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.02f, 0.10f, 0.24f, 1.0f);
+    style.Colors[ImGuiCol_ChildBg] = ImVec4(0.02f, 0.18f, 0.36f, 0.78f);
+    style.Colors[ImGuiCol_PopupBg] = ImVec4(0.02f, 0.13f, 0.30f, 0.98f);
+    style.Colors[ImGuiCol_Border] = ImVec4(0.48f, 0.84f, 0.97f, 0.35f);
+    style.Colors[ImGuiCol_FrameBg] = ImVec4(0.04f, 0.24f, 0.43f, 0.90f);
+    style.Colors[ImGuiCol_FrameBgHovered] = ImVec4(0.07f, 0.38f, 0.60f, 1.0f);
+    style.Colors[ImGuiCol_FrameBgActive] = ImVec4(0.10f, 0.48f, 0.68f, 1.0f);
+    style.Colors[ImGuiCol_Button] = ImVec4(0.04f, 0.27f, 0.49f, 0.95f);
+    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.10f, 0.50f, 0.70f, 1.0f);
+    style.Colors[ImGuiCol_ButtonActive] = ImVec4(0.17f, 0.71f, 0.87f, 1.0f);
+    style.Colors[ImGuiCol_CheckMark] = ImVec4(0.38f, 0.91f, 1.0f, 1.0f);
+    style.Colors[ImGuiCol_Header] = ImVec4(0.05f, 0.35f, 0.60f, 0.9f);
+    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.11f, 0.55f, 0.76f, 1.0f);
+    style.Colors[ImGuiCol_HeaderActive] = ImVec4(0.16f, 0.68f, 0.84f, 1.0f);
     style.FontSizeBase = 17.0f;
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
@@ -4832,6 +5134,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     style.ItemSpacing = ImVec2(10 * scale, 8 * scale);
     style.FrameRounding = 4 * scale;
     style.TabRounding = 4 * scale;
+    style.WindowRounding = 9 * scale;
     wchar_t fonts[MAX_PATH];
     const UINT n = GetWindowsDirectoryW(fonts, MAX_PATH);
     const fs::path segoe = fs::path(std::wstring(fonts, n)) / L"Fonts" / L"segoeui.ttf";
@@ -4841,6 +5144,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
+    LoadArtwork();
     if (g_app.launcher.Flag("discord_rpc", true))
         RegisterDiscordLaunch(DiscordAppId());
 
@@ -4893,6 +5197,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
+    ReleaseArtwork();
     CleanupDevice();
     DestroyWindow(hwnd);
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
