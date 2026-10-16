@@ -47,6 +47,28 @@ at the monitor's size and the camera follows its aspect). Three things look wron
 BbOverlay does with its settings); a bbport.ini key `ultrawide_cinematics=pillarbox|full` and a
 menu checkbox; tests for the patch side.
 
+## Ultrawide: title screen logo and "Press X to begin"
+
+**State (EU 1.21):** src/runtime_frontend.c gives the title screen and the kart customization
+screen the horizontal field of view of 16:9 (title 79.755 -> 63.742 degrees, customization
+36.739 -> 27.762 at 3440x1440), so their 16:9 backdrop fills the width. The menus are 2D and keep
+their ultrawide layout. On the title screen the 3D logo grows by about 1.34 and its bottom
+("Nitro-Fueled") now overlaps the 2D "Press X to begin". Narrowing less does not help: the backdrop
+covers only 75.5% of the ultrawide width (16:9 is 74.4%).
+
+**Wanted:** the logo a little higher on the title screen only (or the text lower).
+
+**How the field of view works (found 2026-10-16 with a hardware watchpoint on the render camera
+and Ghidra):** the main render pass (`CPreRenderUpdatePass`, `_cameraName` "main",
+`_renderCamera` +0x168) has a render camera with the horizontal field of view in degrees at +0x3c,
+the aspect at +0x40, near/far at +0x64/+0x68 and the position at +0xa0. One function (0xaf7110 in
+EU 1.21) writes them each frame: +0x3c = camera setup's radians (+0xd0) * 57.29578 (the
+instruction at 0xaf7278, which runtime_frontend.c points at its own factor), +0x40 = window
+width/height * `_cameraAspectRatioMultiplier`. Readers (0x355c5c frustum, 0x960a04, 0xb0363b)
+take tan(fov/2): the sideways extent is tan, the vertical tan/aspect (so +0x3c is horizontal).
+Next: find where the position (+0xa0) or the view direction is written in the same way (a
+watchpoint on +0xa0) and lower the camera a little while the title screen shows.
+
 ## Ultrawide on USA 1.21 (CUSA13795)
 
 `OUTPUT_SIZE_SIGNATURE` was taken from the EU 1.00 executable. On another build it applies only
