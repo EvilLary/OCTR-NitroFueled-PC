@@ -132,4 +132,6 @@ if [[ ${1:-} == --test ]]; then
     out/content-test --addons
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_eventflag.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/eventflag-test
     out/eventflag-test
+    "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -Isrc tests/test_net_tunnel.c src/runtime_net_tunnel.c -o out/net-tunnel-test
+    out/net-tunnel-test
 fi

@@ -444,6 +444,11 @@ void SignalEop(const PM4CmdEventWriteEop& eop, u64 seq) {
         [seq](void* address, u64 data, u32 num_bytes) {
             auto* memory = Core::Memory::Instance();
             EopDelayTest().Apply();
+            // issue #2: the game already rebuilt this label's slot for a later frame.
+            if (BbClobber::StaleLabel(reinterpret_cast<u64>(address), data, num_bytes,
+                                      BbClobber::Eop)) {
+                return;
+            }
             BbFreeCheck::Check(reinterpret_cast<u64>(address), num_bytes, &data, BbFreeCheck::Eop,
                                seq);
             BbFreeCheck::NoteFenceWriting(reinterpret_cast<u64>(address));
@@ -593,6 +598,10 @@ void RunWriteData(Vulkan::Rasterizer& rasterizer, const u8* data) {
 void WriteEosLabel(void* address, u64 value, u32 num_bytes) {
     auto* memory = Core::Memory::Instance();
     EosDelayTest().Apply(); // BB_EOS_DELAY_TEST (experiment, see LabelDelayTest)
+    // issue #2: the game already rebuilt this label's slot for a later frame.
+    if (BbClobber::StaleLabel(reinterpret_cast<u64>(address), value, num_bytes, BbClobber::Eos)) {
+        return;
+    }
     BbFreeCheck::Check(reinterpret_cast<u64>(address), num_bytes, &value, BbFreeCheck::Eos);
     BbFreeCheck::NoteFenceWriting(reinterpret_cast<u64>(address));
     BbWriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, BbWriteLog::Fence);
@@ -1108,6 +1117,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
     // walked them right after the memcpy).
     if (copy && dcb_depth == 0) {
         BbClobber::NoteDecoding(seq);
+        BbClobber::NoteDecodingCopy(seq, copy->guest_dcb,
+                                    std::shared_ptr<const u32>(copy, copy->data.data()),
+                                    copy->dcb_dwords);
         copy->bad_at_decode = BbClobber::FirstBadHeader(dcb.data(), dcb.size());
         if (copy->bad_at_decode != copy->bad_at_submit) {
             const double ms = std::chrono::duration<double, std::milli>(
