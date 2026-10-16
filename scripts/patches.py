@@ -211,7 +211,7 @@ def external_selection(found, config, ini=None):
     enabled,disabled=set(settings.get('enabled',[])),set(settings.get('disabled',[]))
     for key,patch in GAME_PATCH_KEYS.items():
         if (ini or {}).get(key)=='1': enabled.add(patch); disabled.discard(patch)
-    if os.environ.get('BB_ONLINE')=='1' or (ini or {}).get('online')=='1':
+    if os.environ.get('BB_ONLINE', (ini or {}).get('online', '0'))=='1':
         enabled.add('CrashTeamRacingOnline.xml/Online: custom Demonware key')
     # The 1080p Pro patch follows render_res (Settings > Internal resolution, the in-game menu).
     pro_1080p=GAME_PATCH_KEYS['patch_pro_1080p']

@@ -135,6 +135,7 @@ __asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
 #endif
 static ABI void guest_exit(void) { puts("Runtime: process finalizer callback reached"); }
+const char *runtime_thread_current_name(void);
 #ifdef _WIN32
 static void describe_address(char *out, size_t size, uintptr_t address) {
     HMODULE module=NULL;
@@ -148,7 +149,6 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     }
     snprintf(out,size,"%p",(void *)address);
 }
-const char *runtime_thread_current_name(void);
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
@@ -499,6 +499,17 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
 }
 #endif
 #ifndef _WIN32
+static ssize_t read_self_memory(void *out, uintptr_t address, size_t size) {
+    struct iovec local={out,size}, remote={(void *)address,size};
+    ssize_t n=process_vm_readv(getpid(),&local,1,&remote,1,0);
+    if (n==(ssize_t)size) return n;
+    /* Some sandboxes deny process_vm_readv even for the current process. */
+    int fd=open("/proc/self/mem",O_RDONLY|O_CLOEXEC);
+    if (fd<0) return n;
+    n=pread(fd,out,size,(off_t)address);
+    close(fd);
+    return n;
+}
 static void fault(int sig, siginfo_t *info, void *context) {
     /* GPU page tracking (write-protected guest pages) is resolved first. */
     if (gpu_enabled && sig == SIGSEGV && bbgpu_handle_fault(context, info->si_addr)) return;
@@ -526,6 +537,29 @@ static void fault(int sig, siginfo_t *info, void *context) {
     else
         snprintf(line, sizeof(line), "Fault (signal %d) at RIP %p, address %p\n", sig, (void *)rip, info->si_addr);
     { ssize_t written_=write(2, line, strlen(line)); (void)written_; }
+    if (!rip) {
+        /* An indirect call to zero leaves its return address at RSP. A jump or return to zero
+         * may leave something else there, so report this as a candidate call site. */
+        uintptr_t rsp=(uintptr_t)uc->uc_mcontext.gregs[REG_RSP], caller=0;
+        if (rsp && read_self_memory(&caller,rsp,sizeof(caller))==(ssize_t)sizeof(caller)) {
+            if (caller-(uintptr_t)image<0x10000000)
+                snprintf(line,sizeof(line),"  stack return candidate: guest offset 0x%lx\n",
+                         (unsigned long)(caller-(uintptr_t)image));
+            else if (dladdr((void *)caller,&where) && where.dli_fname)
+                snprintf(line,sizeof(line),"  stack return candidate: %s+0x%lx (%s)\n",where.dli_fname,
+                         (unsigned long)(caller-(uintptr_t)where.dli_fbase),where.dli_sname ? where.dli_sname : "?");
+            else
+                snprintf(line,sizeof(line),"  stack return candidate: %p\n",(void *)caller);
+            { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+        }
+        snprintf(line,sizeof(line),"  rsp=%p rbp=%p rax=%p rbx=%p rcx=%p rdx=%p\n",
+                 (void *)rsp,(void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RBP],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RAX],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RBX],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RCX],
+                 (void *)(uintptr_t)uc->uc_mcontext.gregs[REG_RDX]);
+        { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+    }
     if (gpu_enabled) bbgpu_dump_guest_writes(context);
     /* Outside the image and any shared object (generated code, a freed mapping): the mapping
      * from /proc/self/maps, and the thread. */
@@ -546,6 +580,11 @@ static void fault(int sig, siginfo_t *info, void *context) {
         }
         if (maps) fclose(maps);
         if (!found) { ssize_t written_=write(2, "none\n", 5); (void)written_; }
+        const char *guest_name=runtime_thread_current_name();
+        if (guest_name) {
+            snprintf(line,sizeof(line),"  guest thread: %s\n",guest_name);
+            { ssize_t written_=write(2,line,strlen(line)); (void)written_; }
+        }
     }
     /* Host call chain (frames with unwind info; guest frames end it). */
     void *frames[32];
@@ -581,8 +620,7 @@ static void dump_frames(ucontext_t *uc) {
         write_hex(line+6,tid); write_hex(line+27,rip); write_hex(line+59,rip-(uintptr_t)image); write_hex(line+90,rip-exe_base);
         { ssize_t written_=write(2,line,sizeof(line)-1); (void)written_; }
         uintptr_t frame[2];
-        struct iovec local={frame,sizeof(frame)}, remote={(void *)rbp,sizeof(frame)};
-        if (!rbp || process_vm_readv(getpid(),&local,1,&remote,1,0)!=(ssize_t)sizeof(frame)) break;
+        if (!rbp || read_self_memory(frame,rbp,sizeof(frame))!=(ssize_t)sizeof(frame)) break;
         if (frame[0]<=rbp) break;
         rbp=frame[0]; rip=frame[1];
     }
