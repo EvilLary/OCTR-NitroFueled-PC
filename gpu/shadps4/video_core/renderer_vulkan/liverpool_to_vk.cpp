@@ -637,7 +637,13 @@ std::span<const SurfaceFormatInfo> SurfaceFormats() {
         // 10_11_11
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format10_11_11, AmdGpu::NumberFormat::Float,
                                 vk::Format::eB10G11R11UfloatPack32),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format10_11_11, AmdGpu::NumberFormat::Unorm,
+                                vk::Format::eB10G11R11UfloatPack32),
         // 11_11_10 - Remapped to 10_11_11.
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format11_11_10, AmdGpu::NumberFormat::Float,
+                                vk::Format::eB10G11R11UfloatPack32),
+        CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format11_11_10, AmdGpu::NumberFormat::Unorm,
+                                vk::Format::eB10G11R11UfloatPack32),
         // 10_10_10_2 - Remapped to 2_10_10_10.
         // 2_10_10_10
         CreateSurfaceFormatInfo(AmdGpu::DataFormat::Format2_10_10_10, AmdGpu::NumberFormat::Unorm,
@@ -786,10 +792,11 @@ vk::Format TrySurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat
 
 vk::Format SurfaceFormat(AmdGpu::DataFormat data_format, AmdGpu::NumberFormat num_format) {
     vk::Format result = surface_format_table[GetSurfaceFormatTableIndex(data_format, num_format)];
-    bool found =
-        result != vk::Format::eUndefined || data_format == AmdGpu::DataFormat::FormatInvalid;
-    ASSERT_MSG(found, "Unknown data_format={} and num_format={}", static_cast<u32>(data_format),
-               static_cast<u32>(num_format));
+    if (result == vk::Format::eUndefined && data_format != AmdGpu::DataFormat::FormatInvalid) {
+        LOG_WARNING(Render_Vulkan, "Unknown data_format={} and num_format={}, falling back to B10G11R11UfloatPack32",
+                    static_cast<u32>(data_format), static_cast<u32>(num_format));
+        return vk::Format::eB10G11R11UfloatPack32;
+    }
     return result;
 }
 
