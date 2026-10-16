@@ -249,6 +249,40 @@ static int server_is_this_machine(void) {
     return cached;
 }
 
+/* This PC's address on the network it reaches the RyuNET server through (the LAN, or a
+ * Radmin/ZeroTier one). The game puts it in its host address as the local address, which
+ * players behind the same router (same public IP) connect through, as two PS4s at home do.
+ * 127.0.0.1 there made each of them connect to itself, so they could never join each other.
+ * Connecting a UDP socket sends nothing: it only asks the OS which route and source it uses. */
+static const char *local_ipv4(void) {
+    static char cached[16];
+    if (cached[0]) return cached;
+    snprintf(cached, sizeof(cached), "127.0.0.1");
+    const char *srv = getenv("BB_ONLINE_SERVER");
+    if (!srv || !*srv) return cached;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(srv, NULL, &hints, &res) != 0 || !res) return cached;
+    struct sockaddr_in to = *(const struct sockaddr_in *)res->ai_addr;
+    freeaddrinfo(res);
+    to.sin_port = htons(3074);
+    SOCKET probe = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (probe == INVALID_SOCKET) return cached;
+    struct sockaddr_in me;
+    socklen_t me_len = sizeof(me);
+    memset(&me, 0, sizeof(me));
+    if (connect(probe, (struct sockaddr *)&to, sizeof(to)) == 0 &&
+        getsockname(probe, (struct sockaddr *)&me, &me_len) == 0 && me.sin_addr.s_addr != 0) {
+        const unsigned char *b = (const unsigned char *)&me.sin_addr.s_addr;
+        snprintf(cached, sizeof(cached), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+    }
+    closesocket(probe);
+    runtime_net_trace("Local address for other players on this network: %s", cached);
+    return cached;
+}
+
 int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) {
     (void)addrlen;
     VSocket *vs = vsocket_get(s);
@@ -845,7 +879,7 @@ int32_t runtime_netctl_info(int code, void *info) {
             *(uint32_t *)info = 1;
             break;
         case 14: /* IP_ADDRESS */
-            strncpy((char *)info, "127.0.0.1", 16);
+            strncpy((char *)info, local_ipv4(), 16);
             break;
         case 15: /* NETMASK */
             strncpy((char *)info, "255.255.255.0", 16);

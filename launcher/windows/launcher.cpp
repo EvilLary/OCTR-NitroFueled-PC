@@ -1260,9 +1260,14 @@ void StopGame() {
     else if (g_app.process) TerminateProcess(g_app.process, 1);
 }
 
-/// Discord application whose name and art the presence shows. launcher.ini discord_app_id
-/// overrides it; empty leaves the presence off.
+/// Discord application whose name and art the presence shows (and whose OAuth2 links
+/// nicknames). launcher.ini discord_app_id can name another one; empty or missing is this one.
 constexpr const char* kDiscordAppId = "1560408801704943708";
+
+std::string DiscordAppId() {
+    const std::string id = g_app.launcher.Get("discord_app_id");
+    return id.empty() ? kDiscordAppId : id;
+}
 
 /// Shows the game in the player's Discord status while it runs (launcher.ini discord_rpc,
 /// on by default). Called every frame; DiscordPresence only talks to Discord on a change.
@@ -1275,7 +1280,7 @@ void UpdateDiscord() {
         started = int64_t(std::time(nullptr));
     }
     const bool enabled = a.launcher.Flag("discord_rpc", true);
-    const std::string app_id = a.launcher.Get("discord_app_id", kDiscordAppId);
+    const std::string app_id = DiscordAppId();
     if (!a.game_running) {
         DiscordPresence::Update(enabled, app_id, nullptr);
         return;
@@ -2599,7 +2604,7 @@ void StartDiscordLink(DiscordLinkMode mode) {
     App& a = g_app;
     const std::string server = Trim(a.game.Get("online_server", "octr.ryu7w7.xyz"));
     const std::string nick = mode == DiscordLinkMode::Recover ? std::string() : CurrentNick();
-    const std::string app_id = a.launcher.Get("discord_app_id", kDiscordAppId);
+    const std::string app_id = DiscordAppId();
     {
         std::scoped_lock lock{g_discord_link.mutex};
         if (g_discord_link.busy) return;
@@ -4765,7 +4770,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         PollJobs();
         if (GameReady()) {
             if (g_app.launcher.Flag("discord_rpc", true))
-                RegisterDiscordLaunch(g_app.launcher.Get("discord_app_id", kDiscordAppId));
+                RegisterDiscordLaunch(DiscordAppId());
             StartGame();
             while (g_app.game_running) {
                 MSG msg;
@@ -4837,7 +4842,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
     if (g_app.launcher.Flag("discord_rpc", true))
-        RegisterDiscordLaunch(g_app.launcher.Get("discord_app_id", kDiscordAppId));
+        RegisterDiscordLaunch(DiscordAppId());
 
     bool done = false;
     while (!done) {
