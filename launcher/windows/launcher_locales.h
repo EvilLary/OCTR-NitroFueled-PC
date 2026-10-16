@@ -60,7 +60,7 @@ inline const std::map<std::string, std::map<std::string, std::string>>& Generate
             {"Merges the update over the base game into a new folder with hard links: no extra disk space and your original folders are not changed (copied if they are on different drives).", "Mescla a atualização do jogo base em uma nova pasta com links físicos: nenhum espaço extra em disco e suas pastas originais não são alteradas (copiados se estiverem em unidades diferentes)."},
             {"I already have the merged game...", "Já tenho o jogo mesclado..."},
             {"Stop the game", "Pare o jogo"},
-            {"PLAY", "PLAY"},
+            {"PLAY", "JOGAR"},
             {"Create Desktop Shortcut", "Criar atalho na área de trabalho"},
             {"Desktop shortcut created successfully (launches directly without launcher).", "Atalho na área de trabalho criado com sucesso (inicia diretamente sem inicializador)."},
             {"The game is running. The first start compiles shaders and takes a while.", "O jogo está em execução. A primeira inicialização compila shaders e demora um pouco."},

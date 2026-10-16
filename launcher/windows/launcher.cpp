@@ -69,6 +69,7 @@ struct LauncherArtwork {
 LauncherArtwork g_hero_art;
 LauncherArtwork g_logo_art;
 LauncherArtwork g_menu_background;
+ImFont* g_ctr_font = nullptr;
 RECT g_titlebar_drag{};
 float g_ui_scale = 1.0f;
 extern ID3D11Device* g_device;
@@ -2118,6 +2119,45 @@ void ChoiceCombo(const char* label, const char* key, const Choice (&choices)[N],
 
 bool CreateDesktopShortcut(std::string& out_error);
 bool AddToSteam(std::string& out_msg);
+void DrawMenuIcon(ImDrawList* d, int id, ImVec2 c, ImU32 ink, float s);
+
+bool PrimaryPlayButton(const char* label, ImVec2 size, bool disabled) {
+    const bool pressed = ImGui::InvisibleButton("##primary_play", size);
+    const ImVec2 a = ImGui::GetItemRectMin();
+    const ImVec2 actual_size = ImGui::GetItemRectSize();
+    const bool hovered = ImGui::IsItemHovered();
+    const bool active = ImGui::IsItemActive();
+    const float press_offset = active ? 2.0f : 0.0f;
+    const float y0 = a.y + 2.0f + press_offset;
+    const float y1 = a.y + actual_size.y - 2.0f + press_offset;
+    const float cy = (y0 + y1) * 0.5f;
+    const float inset = 11.0f;
+    ImVec2 shape[] = {
+        {a.x + inset, y0}, {a.x + actual_size.x - 22.0f, y0}, {a.x + actual_size.x - 5.0f, cy},
+        {a.x + actual_size.x - 22.0f, y1}, {a.x + inset, y1}, {a.x + inset + 13.0f, cy},
+    };
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    if (!active) {
+        ImVec2 shadow[6];
+        for (int i = 0; i < 6; ++i) shadow[i] = ImVec2(shape[i].x, shape[i].y + 4.0f);
+        d->AddConvexPolyFilled(shadow, 6, IM_COL32(0, 29, 76, disabled ? 90 : 185));
+    }
+    const ImU32 fill = disabled ? IM_COL32(140, 190, 210, 190)
+                                : hovered ? IM_COL32(250, 255, 255, 255) : IM_COL32(224, 247, 255, 255);
+    d->AddConvexPolyFilled(shape, 6, fill);
+    d->AddPolyline(shape, 6, disabled ? IM_COL32(177, 215, 230, 170) : IM_COL32(255, 255, 255, 255),
+                   ImDrawFlags_Closed, hovered ? 2.4f : 1.8f);
+    d->AddLine({a.x + 24.0f, y0 + 5.0f}, {a.x + actual_size.x - 28.0f, y0 + 5.0f},
+               disabled ? IM_COL32(255, 255, 255, 70) : IM_COL32(255, 255, 255, 170), 1.0f);
+    DrawMenuIcon(d, 0, {a.x + 39.0f, cy}, disabled ? IM_COL32(81, 119, 138, 255) : IM_COL32(5, 63, 109, 255), 1.0f);
+    ImFont* font = ImGui::GetFont();
+    const float font_size = ImGui::GetFontSize();
+    const ImVec2 text_size = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, label);
+    const ImVec2 text_pos{a.x + (actual_size.x - text_size.x) * 0.5f, cy - text_size.y * 0.5f};
+    d->AddText(font, font_size, text_pos,
+               disabled ? IM_COL32(81, 119, 138, 255) : IM_COL32(4, 49, 86, 255), label);
+    return pressed;
+}
 
 void PlayTab() {
     App& a = g_app;
@@ -2262,13 +2302,10 @@ void PlayTab() {
         ImGui::PopStyleColor(2);
     } else {
         ImGui::BeginDisabled(!ready || busy || !a.python);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.74f, 0.94f, 1.0f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.87f, 0.98f, 1.0f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.02f, 0.18f, 0.34f, 1.0f));
-        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.5f);
-        if (ImGui::Button(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height))) PressPlay();
+        ImGui::PushFont(g_ctr_font, ImGui::GetStyle().FontSizeBase * 1.5f);
+        if (PrimaryPlayButton(T("JUGAR", "PLAY"), ImVec2(-FLT_MIN, play_height),
+                              !ready || busy || !a.python)) PressPlay();
         ImGui::PopFont();
-        ImGui::PopStyleColor(3);
         ImGui::EndDisabled();
     }
 
@@ -4700,9 +4737,11 @@ bool MenuEntry(int id, const char* label, bool selected, float width) {
     }
     const ImVec2 icon{a.x+31.0f+slide,a.y+size.y*0.5f};
     DrawMenuIcon(d,id,icon,selected?IM_COL32(9,64,112,255):IM_COL32(234,249,255,235),0.75f);
-    const ImVec2 text_size=ImGui::CalcTextSize(label);
+    ImFont* label_font = g_ctr_font ? g_ctr_font : ImGui::GetFont();
+    const float label_font_size = ImGui::GetFontSize();
+    const ImVec2 text_size=label_font->CalcTextSizeA(label_font_size, FLT_MAX, 0.0f, label);
     const ImVec2 text{a.x+55.0f+slide,a.y+(size.y-text_size.y)*0.5f};
-    d->AddText(text,selected?IM_COL32(4,46,84,255):IM_COL32(237,249,255,245),label);
+    d->AddText(label_font,label_font_size,text,selected?IM_COL32(4,46,84,255):IM_COL32(237,249,255,245),label);
     return clicked;
 }
 
@@ -5141,6 +5180,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::error_code ec;
     if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
     else io.Fonts->AddFontDefault();
+    const fs::path ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
+    if (fs::is_regular_file(ctr_font, ec))
+        g_ctr_font = io.Fonts->AddFontFromFileTTF(PathText(ctr_font).c_str(), style.FontSizeBase);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
