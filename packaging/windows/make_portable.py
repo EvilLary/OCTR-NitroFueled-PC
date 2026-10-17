@@ -126,6 +126,9 @@ def third_party(dlls, python=None, dlss=False):
               'https://github.com/FireBurn/FSR-Vulkan).', '']
     lines += ['The launcher (CTR-NitroFueled-PC.exe) and sacredfire.exe include Dear ImGui (MIT,',
               'https://github.com/ocornut/imgui) and the other libraries listed in the repository.', '']
+    lines += ['art\\ctr-menu.ttf: the Lilita One font by Juan Montoreano (SIL Open Font License 1.1,',
+              'art\\ctr-menu-font-license.txt). art\\ctr-hero.png and art\\ctr-logo.png: game artwork',
+              'from SteamGridDB, the property of its owners (art\\README.txt).', '']
     lines += ['The game files are not included and are not covered by any of these licenses.',
               'Not affiliated with Sony, Activision or Beenox.', '']
     return '\r\n'.join(lines)
@@ -207,6 +210,8 @@ def main():
     steamgrid_dir = PORTABLE.parent / 'steamgrid'
     if steamgrid_dir.is_dir():
         shutil.copytree(steamgrid_dir, folder / 'steamgrid', dirs_exist_ok=True)
+    # The launcher's artwork and menu font (art\README.txt says where each comes from).
+    shutil.copytree(ROOT / 'art', folder / 'art', dirs_exist_ok=True)
     if (ROOT / 'out' / 'aerolib.inl').is_file():
         shutil.copy2(ROOT / 'out' / 'aerolib.inl', folder / 'out')
     # bbport.ini is in .gitignore (it is the player's settings file), so the defaults live in
