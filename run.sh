@@ -84,9 +84,11 @@ fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
-# keys) or patches.json; BB_PATCHES_DIR adds a folder of further shadPS4-format XML files.
+# keys) or patches.json; BB_PATCHES_DIR replaces the bundled folder. The player's own XML files go
+# in the data folder's patches/ (the launcher's Patches page; the package's folder is read-only).
 fps=${BB_FPS:-30}
-"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
+"$PYTHON" scripts/patches.py --patches-dir "${BB_PATCHES_DIR:-patches}" --patches-dir "$data/patches" \
+    --patches-config "${BB_PATCHES_CONFIG:-$data/patches.json}" \
     --app-version 01.21 --title-id CUSA13795 --out "$out" --settings "$BB_CONFIG"
 patch_args=(--patches "$out/patches.bin")
 # bbport.ini render_res (the launcher's and the in-game menu's internal resolution, as run.py

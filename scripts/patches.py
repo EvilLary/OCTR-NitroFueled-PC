@@ -229,6 +229,21 @@ def external_patches(directory, app_version=APP_VERSION, title_id=TITLE_ID):
     return found
 
 
+def all_external_patches(directories, app_version=APP_VERSION, title_id=TITLE_ID):
+    """external_patches of several folders (the bundled patches/, then the player's own: the Linux
+    package's is read-only). A later folder's file replaces the patches of a file of the same name."""
+    by_file,seen={},set()
+    for directory in directories:
+        folder=Path(directory).resolve()
+        if folder in seen: continue  # the same folder named twice (a checkout's data folder)
+        seen.add(folder)
+        for key,path,meta in external_patches(directory,app_version,title_id):
+            if path.name in by_file and by_file[path.name][0]!=path.parent:
+                by_file[path.name]=(path.parent,[])
+            by_file.setdefault(path.name,(path.parent,[]))[1].append((key,path,meta))
+    return [patch for name in sorted(by_file) for patch in by_file[name][1]]
+
+
 def external_selection(found, config, ini=None):
     """Selected patches: patches.json {"enabled": [...], "disabled": [...]} overrides each file's
     isEnabled; bbport.ini patch_* keys (GAME_PATCH_KEYS, the in-game menu) add to it."""
@@ -286,7 +301,9 @@ def write_blob(out, writes):
 def main():
     root=Path(__file__).resolve().parent.parent
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--patches-dir',type=Path,default=root/'patches',help='patch XML files (shadPS4 format)')
+    p.add_argument('--patches-dir',type=Path,action='append',
+                   help='patch XML files (shadPS4 format); repeatable, a later folder\'s file replaces one of the same name '
+                        '(default: patches/ in the checkout)')
     p.add_argument('--patches-config',type=Path,help='patches.json: enabled/disabled patches')
     p.add_argument('--app-version',default=APP_VERSION)
     p.add_argument('--title-id',default=TITLE_ID,help='the game (patch files naming other ids are skipped)')
@@ -296,7 +313,7 @@ def main():
     a=p.parse_args()
     elf=(a.out/'eboot.elf').read_bytes()
     segments=eboot_segments(elf)
-    found=external_patches(a.patches_dir,a.app_version,a.title_id)
+    found=all_external_patches(a.patches_dir or [root/'patches'],a.app_version,a.title_id)
     settings=read_settings(a.settings)
     writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
                             +theme_patches(settings),
