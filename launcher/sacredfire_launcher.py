@@ -68,7 +68,13 @@ PATCHES = [
     ("patch_60fps", "60 FPS unlock", "By illusion. 60 in menus, 40-45 in races on a Steam Deck"),
     ("patch_no_motion_blur", "Disable motion blur", "By illusion"),
     ("patch_pro_1080p", "1080p in PS4 Pro mode", "By TroyWarez; only with PS4 Pro mode below"),
+    ("patch_unlock_all", "Unlock Everything",
+     "By Camiloop. Unlocks what the game grants when its unlock conditions are met; back up your saves first"),
 ]
+# The game's FPS limit (bbport.ini fps_limit; the in-game menu offers the same values). Above 30
+# it needs the 60 FPS patch.
+FPS_LIMITS = [("No limit", "0"), ("30", "30"), ("60", "60"), ("72 (half of 144 Hz)", "72"),
+              ("90", "90"), ("120", "120"), ("144", "144"), ("240", "240")]
 
 DEFAULTS = {
     "ui_language": "",
@@ -87,7 +93,7 @@ DEFAULTS = {
     "vk_validation": False,
     "extra_env": "",
 }
-INI_DEFAULTS = {"show_fps": "0", **{key: "0" for key, _, _ in PATCHES}}
+INI_DEFAULTS = {"show_fps": "0", "fps_limit": "60", **{key: "0" for key, _, _ in PATCHES}}
 # RyuNET online (run.py setup_online reads the same bbport.ini keys). The nickname is the
 # player's identity on the server: the first installation to use one keeps it.
 ONLINE_SERVER = "octr.ryu7w7.xyz"
@@ -298,8 +304,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.game_row.add_suffix(self.game_status)
         self.game_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the folder with eboot.bin"), self.on_choose_game))
         game.add(self.game_row)
-        self.user_row = Adw.ActionRow(title=tr("Saves folder"))
-        self.user_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the saves folder"), self.on_choose_user))
+        self.user_row = Adw.ActionRow(title=tr("Saves and game data folder"))
+        self.user_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the saves and game data folder"), self.on_choose_user))
         self.user_row.add_suffix(flat_button("edit-undo-symbolic", tr("Back to the default folder"), self.on_reset_user))
         self.user_row.add_suffix(flat_button("folder-symbolic", tr("Open in the file manager"),
                                              lambda _b: open_folder(self, self.user_dir())))
@@ -359,6 +365,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.present_row)
         self.fps_row = Adw.SwitchRow(title=tr("FPS counter in the corner"), active=self.ini.get("show_fps") == "1")
         screen.add(self.fps_row)
+        self.fps_limit_row = combo_row(tr("FPS limit"), tr("Above 30 it needs the 60 FPS unlock patch; also in the in-game menu"),
+                                       FPS_LIMITS, self.ini.get("fps_limit", "60"))
+        screen.add(self.fps_limit_row)
         page.add(screen)
 
         dev = Adw.PreferencesGroup(title=tr("Developer"))
@@ -401,7 +410,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         return Path(self.settings["user_dir"]).expanduser() if self.settings["user_dir"] else DATA_DIR / "user"
 
     def update_user_status(self):
-        self.user_row.set_subtitle(str(self.user_dir()) + ("" if self.settings["user_dir"] else tr(" (default)")))
+        # The game keeps all of its user data here (saves, shader cache, ...): a new folder starts
+        # empty, so copy the saves into it to keep them.
+        self.user_row.set_subtitle(str(self.user_dir()) + ("" if self.settings["user_dir"] else tr(" (default)")) + "\n" +
+                                   tr("Saves, shader cache and the game's other data: a new folder starts empty"))
 
     def update_game_status(self):
         path = self.game_dir()
@@ -473,15 +485,27 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["extra_env"] = self.env_row.get_text()
         s["ui_language"] = combo_value(self.ui_language_row)
         save_settings(s)
+        self.ini, self.ini_lines = load_ini()
         for key, row in self.patch_rows.items():
             self.ini[key] = "1" if row.get_active() else "0"
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
+        self.ini["fps_limit"] = combo_value(self.fps_limit_row)
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
         self.ini["online_name"] = self.nick_row.get_text().strip()
         self.ini["online_server"] = self.server_row.get_text().strip() or ONLINE_SERVER
         self.ini["online_inventory"] = combo_value(self.inventory_row)
         save_ini(self.ini, self.ini_lines)
         self.ini, self.ini_lines = load_ini()
+
+    def reload_game_settings(self):
+        """bbport.ini as the in-game menu left it: the switches show what the game will use."""
+        self.ini, self.ini_lines = load_ini()
+        for key, row in self.patch_rows.items():
+            row.set_active(self.ini.get(key) == "1")
+        self.fps_row.set_active(self.ini.get("show_fps") == "1")
+        limit = self.ini.get("fps_limit", "60")
+        values = self.fps_limit_row.values
+        self.fps_limit_row.set_selected(values.index(limit) if limit in values else values.index("60"))
 
     def environment(self):
         return game_environment(self.settings)
@@ -672,6 +696,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             pass
         status = process.get_exit_status() if process.get_if_exited() else -1
         self.process = None
+        self.reload_game_settings()
         self.update_launch_button()
         self.update_game_status()
         self.append_log(tr("\n— the game exited (code {}) —\n").format(status))
