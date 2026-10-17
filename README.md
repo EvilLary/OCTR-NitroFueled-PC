@@ -37,6 +37,7 @@ in the background with the experimental switch.
 
 | Release | What it brought |
 |---|---|
+| [v0.5.1](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5.1) (pre-release) | Fix for the code 3 crash at start; the game no longer stops when VRAM runs short; GPU hangs (code 23) report their cause in the log; a server tunnel for players who cannot reach each other directly; redesigned launcher, now named *Crash™ Team Racing Nitro-Fueled*, in nine languages, with the NAT type on its Play page; Linux launcher: FPS limit, Unlock Everything, in-game settings kept |
 | [v0.5](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.5) | Your own online nickname, linked to your Discord account and recoverable on any PC; Discord invites that join a private room directly; Discord presence; game volume (0-200%); keyboard as a split-screen player; optional "Unlock Everything" patch; Pit Stop items from the server or from your save; players on the same network can join each other; fixes for error codes 3 and 23; first Linux AppImage of this fork |
 | [v0.4](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.4) | Private matches and groups; the in-game friends list |
 | [v0.3 online](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases/tag/v0.3) | First online build: matchmaking, lobbies and the Pit Stop on the RyuNET server; Online section in the launcher (server and nickname); hostnames for the server; bundled Python 3.14 |
@@ -54,7 +55,7 @@ Earlier releases, from [GetLostIn's repository](https://github.com/GetLostIn/CTR
 
 **Easiest: the portable build.** Download `CTR-NitroFueled-PC-portable-<version>-windows.zip`
 from [Releases](https://github.com/Ryu7w7/OCTR-NitroFueled-PC/releases), unzip it anywhere and
-open **`CTR-NitroFueled-PC.exe`**, the launcher: choose your `CUSA13795` (base game) and
+open **`Crash™ Team Racing Nitro-Fueled.exe`** (`CTR-NitroFueled-PC.exe` before v0.5.1), the launcher: choose your `CUSA13795` (base game) and
 `CUSA13795-patch` (update 1.21) folders, press *Prepare the game* once (it merges them with hard
 links, no extra disk space) and then *Play*. Python is bundled; you only need a Vulkan 1.3 GPU.
 
