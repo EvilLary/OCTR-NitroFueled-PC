@@ -153,6 +153,11 @@ public:
     }
 
     /// bbport: VK_AMD_buffer_marker (GPU breadcrumbs).
+    /// VK_EXT_device_fault: the driver describes a device loss (faulting address, vendor codes).
+    bool IsDeviceFaultSupported() const {
+        return device_fault;
+    }
+
     bool IsBufferMarkerSupported() const {
         return buffer_marker;
     }
@@ -599,6 +604,7 @@ private:
     bool maintenance_5{};
     bool maintenance_8{};
     bool buffer_marker{};
+    bool device_fault{};
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};

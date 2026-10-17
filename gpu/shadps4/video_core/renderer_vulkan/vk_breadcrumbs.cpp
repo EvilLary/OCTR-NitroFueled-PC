@@ -10,6 +10,7 @@
 #include <mutex>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 
@@ -55,7 +56,62 @@ struct ArgsNote {
 };
 std::array<ArgsNote, ArgSlots> args_notes{};
 
+vk::Device fault_device{};
+
+/// VK_EXT_device_fault: what the driver knows about the loss (a page fault's address and kind,
+/// vendor fault codes). Printed with the breadcrumbs, whether or not those are available.
+void ReportFault() {
+    const auto get = VULKAN_HPP_DEFAULT_DISPATCHER.vkGetDeviceFaultInfoEXT;
+    if (!fault_device || !get) {
+        return;
+    }
+    VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    VkResult result = get(fault_device, &counts, nullptr);
+    if (result != VK_SUCCESS) {
+        std::printf("GPU fault info: not available (%d)\n", int(result));
+        return;
+    }
+    std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+    std::vector<VkDeviceFaultVendorInfoEXT> vendor(counts.vendorInfoCount);
+    counts.vendorBinarySize = 0;
+    VkDeviceFaultInfoEXT info{
+        .sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+        .pAddressInfos = addresses.data(),
+        .pVendorInfos = vendor.data(),
+    };
+    result = get(fault_device, &counts, &info);
+    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
+        std::printf("GPU fault info: not available (%d)\n", int(result));
+        return;
+    }
+    std::printf("GPU fault info: %s (%u addresses, %u vendor records)\n", info.description,
+                counts.addressInfoCount, counts.vendorInfoCount);
+    static const char* const kinds[] = {"none", "invalid read", "invalid write", "invalid execute",
+                                        "instruction pointer unknown",
+                                        "instruction pointer invalid",
+                                        "instruction pointer fault"};
+    for (u32 i = 0; i < counts.addressInfoCount; ++i) {
+        const VkDeviceFaultAddressInfoEXT& a = addresses[i];
+        const u64 precision = a.addressPrecision ? a.addressPrecision : 1;
+        const u64 low = a.reportedAddress & ~(precision - 1);
+        std::printf("  %s at GPU address %#llx (range %#llx-%#llx)\n",
+                    u32(a.addressType) < std::size(kinds) ? kinds[a.addressType] : "unknown",
+                    (unsigned long long)a.reportedAddress, (unsigned long long)low,
+                    (unsigned long long)(low + precision - 1));
+    }
+    for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
+        std::printf("  vendor: %s (code %#llx, data %#llx)\n", vendor[i].description,
+                    (unsigned long long)vendor[i].vendorFaultCode,
+                    (unsigned long long)vendor[i].vendorFaultData);
+    }
+    std::fflush(stdout);
+}
+
 void Init(const Instance& instance) {
+    if (instance.IsDeviceFaultSupported()) {
+        fault_device = instance.GetDevice();
+        std::printf("GPU fault info: VK_EXT_device_fault on, a device loss reports its cause\n");
+    }
     const char* env = std::getenv("BB_BREADCRUMBS");
     if (env && env[0] == '0') {
         return;
@@ -274,8 +330,11 @@ void Report(const char* title, const char* where);
 
 void ReportDeviceLost(const char* where) {
     static std::atomic_flag reported = ATOMIC_FLAG_INIT;
-    if (enabled && !reported.test_and_set()) {
-        Report("at device lost", where);
+    if (!reported.test_and_set()) {
+        if (enabled) {
+            Report("at device lost", where);
+        }
+        ReportFault();
     }
 }
 
