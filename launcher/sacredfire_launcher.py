@@ -30,8 +30,13 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 PORT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PORT_DIR / "scripts"))
+sys.path.insert(0, str(PORT_DIR))
+import content_profile  # noqa: E402
 import game_check  # noqa: E402
 import steam_shortcuts  # noqa: E402
+import discord_ipc  # noqa: E402
+import discord_oauth  # noqa: E402
+import ryunet_http  # noqa: E402
 
 PACKAGED = bool(os.environ.get("BB_PREBUILT"))
 
@@ -92,7 +97,73 @@ DEFAULTS = {
     "mangohud": False,
     "vk_validation": False,
     "extra_env": "",
+    # DLC in the data folder's dlc/ (run.py BB_DLC_DIR): all on, some turned off by label.
+    "dlc": True,
+    "dlc_disabled": "",
+    # Discord: the game in the player's status while it runs, with invites; "Ask to Join"
+    # requests accepted. discord_app_id names another Discord application (empty: ours).
+    "discord_rpc": True,
+    "discord_accept_requests": True,
+    "discord_app_id": "",
 }
+DISCORD_APP_ID = "1560408801704943708"
+
+# Controls (src/runtime_pad.c): bbport.ini key.<input>= and pad.<input>= replace a default
+# (SDL key and gamepad button names, comma separated); no line keeps the default. The same
+# inputs and defaults as the Windows launcher's Keyboard and Gamepad tabs.
+KEY_INPUTS = [
+    ("move_up", "Left stick up", "W"),
+    ("move_down", "Left stick down", "S"),
+    ("move_left", "Left stick left (steer)", "A"),
+    ("move_right", "Left stick right (steer)", "D"),
+    ("cross", "Cross (accelerate)", "Space"),
+    ("square", "Square (brake)", "E"),
+    ("circle", "Circle", "Left Shift"),
+    ("triangle", "Triangle", "Q"),
+    ("r1", "R1", "3"),
+    ("l1", "L1", "1"),
+    ("r2", "R2", "F"),
+    ("l2", "L2", "R"),
+    ("l3", "L3", "Z"),
+    ("r3", "R3", "C"),
+    ("options", "Options (pause)", "Return"),
+    ("touchpad", "Touchpad", "Tab"),
+    ("touchpad_right", "Touchpad (right)", "Backspace"),
+    ("up", "D-pad up", "I"),
+    ("down", "D-pad down", "K"),
+    ("left", "D-pad left", "J"),
+    ("right", "D-pad right", "L"),
+    ("look_up", "Right stick up", "Up"),
+    ("look_down", "Right stick down", "Down"),
+    ("look_left", "Right stick left", "Left"),
+    ("look_right", "Right stick right", "Right"),
+]
+PAD_INPUTS = [
+    ("cross", "Cross (accelerate / select)", "a"),
+    ("square", "Square (brake / reverse)", "x"),
+    ("circle", "Circle", "b"),
+    ("triangle", "Triangle", "y"),
+    ("l1", "L1 / LB (hop / drift)", "leftshoulder"),
+    ("r1", "R1 / RB (hop / drift)", "rightshoulder"),
+    ("l2", "L2 / LT (use item)", "lefttrigger"),
+    ("r2", "R2 / RT (look back)", "righttrigger"),
+    ("l3", "L3 (left stick click)", "leftstick"),
+    ("r3", "R3 (right stick click)", "rightstick"),
+    ("options", "Options / Start (pause)", "start"),
+    ("touchpad", "Touchpad / Back / Select", "back,touchpad"),
+    ("up", "D-pad up", "dpup"),
+    ("down", "D-pad down", "dpdown"),
+    ("left", "D-pad left", "dpleft"),
+    ("right", "D-pad right", "dpright"),
+]
+PAD_LABELS = {
+    "a": "Cross / A", "b": "Circle / B", "x": "Square / X", "y": "Triangle / Y",
+    "leftshoulder": "L1 / LB", "rightshoulder": "R1 / RB", "lefttrigger": "L2 / LT trigger",
+    "righttrigger": "R2 / RT trigger", "leftstick": "L3", "rightstick": "R3", "start": "Options / Start",
+    "back": "Share / Back / Select", "touchpad": "Touchpad", "dpup": "D-pad up", "dpdown": "D-pad down",
+    "dpleft": "D-pad left", "dpright": "D-pad right", "guide": "Guide / PS", "misc1": "Capture / Misc",
+}
+MAX_KEYS = 4  # bindings per input, as in the Windows launcher
 INI_DEFAULTS = {"show_fps": "0", "fps_limit": "60", **{key: "0" for key, _, _ in PATCHES}}
 # RyuNET online (run.py setup_online reads the same bbport.ini keys). The nickname is the
 # player's identity on the server: the first installation to use one keeps it.
@@ -139,21 +210,23 @@ def load_ini():
 
 
 def save_ini(values, lines):
-    """Rewrites the edited keys in place, appends missing ones, keeps every other line."""
+    """Rewrites the edited keys in place, appends missing ones, keeps every other line. A value
+    of None removes its line (the game's default again)."""
     written = set()
     out = []
     for line in lines:
         if "=" in line and not line.lstrip().startswith("#"):
             key = line.split("=", 1)[0].strip()
             if key in values:
-                out.append(f"{key}={values[key]}")
+                if values[key] is not None and key not in written:
+                    out.append(f"{key}={values[key]}")
                 written.add(key)
                 continue
         out.append(line)
     if not lines:
         out.append("# SacredFire / bbport settings (in-game menu: Insert / L3+R3)")
     for key, value in values.items():
-        if key not in written:
+        if key not in written and value is not None:
             out.append(f"{key}={value}")
     ini_path().write_text("\n".join(out) + "\n")
 
@@ -181,6 +254,8 @@ def game_environment(s):
         env["MANGOHUD"] = "1"
     if s["vk_validation"]:
         env["BB_VK_VALIDATION"] = "1"
+    env["BB_DLC"] = "1" if s.get("dlc", True) else "0"
+    env["BB_DLC_DISABLED"] = s.get("dlc_disabled", "")
     for item in s["extra_env"].split():
         if "=" in item:
             key, value = item.split("=", 1)
@@ -240,6 +315,8 @@ def install_game_icon(game_dir):
     try:
         source = Path(game_dir).expanduser() / "sce_sys/icon0.png"
         if not source.is_file():
+            source = Path(__file__).resolve().parent / f"{APP_ID}.png"  # the package's own
+        if not source.is_file():
             return False
         share = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
         target = share / "icons/hicolor/512x512/apps" / f"{APP_ID}.png"
@@ -262,8 +339,21 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini, self.ini_lines = load_ini()
         self.process = None
         self.stream = None
+        self.game_started = 0  # Unix time the game started, for Discord's "elapsed"
+        self.presence = discord_ipc.Presence()
+        self.party = None  # (players, max) of the lobby we host, from the server
+        self.party_asked = 0.0
+        self.party_busy = False
+        self.announce_asked = 0.0
+        self.announce_busy = False
+        self.announce_seen = ""
+        self.nick_info = None  # the server's answer about the nickname in the field
+        self.nick_asked = ""   # "server|nick" of that answer
+        self.nick_timer = 0
+        self.discord_busy = False
         self.build()
         self.connect("close-request", self.on_close)
+        GLib.timeout_add_seconds(1, self.tick)
 
     def build(self):
         toolbar = Adw.ToolbarView()
@@ -281,10 +371,15 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.set_content(toolbar)
         self.stack.add_titled_with_icon(self.build_settings_page(), "settings", tr("Settings"),
                                         "preferences-system-symbolic")
+        self.stack.add_titled_with_icon(self.build_controls_page(), "controls", tr("Controls"),
+                                        "input-gaming-symbolic")
+        self.stack.add_titled_with_icon(self.build_dlc_page(), "dlc", tr("DLC"),
+                                        "package-x-generic-symbolic")
         self.stack.add_titled_with_icon(self.build_log_page(), "log", tr("Log"),
                                         "utilities-terminal-symbolic")
         self.update_launch_button()
         self.update_game_status()
+        self.ask_nick_status()
 
     def update_launch_button(self):
         running = self.process is not None
@@ -314,17 +409,6 @@ class LauncherWindow(Adw.ApplicationWindow):
         game.add(self.language_row)
         page.add(game)
 
-        controls = Adw.PreferencesGroup(title=tr("Controller"),
-                                        description=tr("Any connected gamepad plus the keyboard; the one used last takes over. "
-                                                       "Split-screen ports are assigned in the in-game menu (Insert / L3+R3)."))
-        pads = connected_gamepads()
-        choices = [(tr("First connected"), "")] + [(name, guid) for guid, name in pads]
-        if self.settings["gamepad"] and self.settings["gamepad"] not in [g for g, _ in pads]:
-            choices.append((tr("{} (not connected)").format(self.settings["gamepad_name"] or self.settings["gamepad"]), self.settings["gamepad"]))
-        self.gamepad_row = combo_row(tr("Controller"), None, choices, self.settings["gamepad"])
-        controls.add(self.gamepad_row)
-        page.add(controls)
-
         patches = Adw.PreferencesGroup(title=tr("Game patches"),
                                        description=tr("From patches/CrashTeamRacing.xml (illusionyy/PS-Game-Patch), applied at start; "
                                                       "also in the in-game menu"))
@@ -337,14 +421,32 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         online = Adw.PreferencesGroup(title=tr("Online (RyuNET)"),
                                       description=tr("Online races, private rooms and the Pit Stop. Your nickname is yours on the server: "
-                                                     "this installation keeps it (ryunet_online.key in the data folder). "
-                                                     "Linking it to Discord is in the Windows launcher."))
+                                                     "this installation keeps it (ryunet_online.key in the data folder); "
+                                                     "link it to Discord to recover it after a reinstall or on another PC."))
         self.online_row = Adw.SwitchRow(title=tr("Play online"), active=self.ini.get("online") == "1")
         online.add(self.online_row)
         self.nick_row = Adw.EntryRow(title=tr("Nickname (3-16 letters, digits, _ or -)"),
                                      text=self.ini.get("online_name", ""))
+        self.nick_row.connect("changed", lambda _row: self.nick_changed())
         online.add(self.nick_row)
+        # What the server says about the nickname, and its Discord account: link it, recover
+        # it, unlink it (the Windows launcher's Online tab).
+        self.nick_status_row = Adw.ActionRow(title=tr("Nickname on the server"))
+        self.discord_link_button = Gtk.Button(label=tr("Link with Discord"), valign=Gtk.Align.CENTER)
+        self.discord_link_button.connect("clicked", lambda _b: self.start_discord_link("link"))
+        self.nick_status_row.add_suffix(self.discord_link_button)
+        self.discord_recover_button = Gtk.Button(label=tr("Recover with Discord"), valign=Gtk.Align.CENTER)
+        self.discord_recover_button.set_tooltip_text(tr("Reinstalled or on another PC? Authorize the Discord account your "
+                                                        "nickname is linked to and the launcher fills it in."))
+        self.discord_recover_button.connect("clicked", lambda _b: self.start_discord_link("recover"))
+        self.nick_status_row.add_suffix(self.discord_recover_button)
+        self.discord_unlink_button = Gtk.Button(label=tr("Unlink"), valign=Gtk.Align.CENTER)
+        self.discord_unlink_button.add_css_class("flat")
+        self.discord_unlink_button.connect("clicked", lambda _b: self.confirm_discord_unlink())
+        self.nick_status_row.add_suffix(self.discord_unlink_button)
+        online.add(self.nick_status_row)
         self.server_row = Adw.EntryRow(title=tr("Server"), text=self.ini.get("online_server") or ONLINE_SERVER)
+        self.server_row.connect("changed", lambda _row: self.nick_changed())
         online.add(self.server_row)
         # The friends whose rooms the game lists under Friends (online_friends in bbport.ini,
         # the Windows launcher's Friends field).
@@ -355,6 +457,29 @@ class LauncherWindow(Adw.ApplicationWindow):
                                        self.ini.get("online_inventory", "server"))
         online.add(self.inventory_row)
         page.add(online)
+
+        discord = Adw.PreferencesGroup(
+            title="Discord",
+            description=tr("Invite to a private match or your party: while you play online, press + in a Discord chat and "
+                           "choose \"Invite to play\". Whoever accepts gets you as a friend and their game starts; in it, "
+                           "they open Friends and join you. Both PCs need this launcher (or the Windows one) and Discord."))
+        self.discord_rpc_row = Adw.SwitchRow(
+            title=tr("Show activity on Discord"),
+            subtitle=tr("While you play, your Discord status shows the game, online or offline, your nickname and the "
+                        "time played. Needs the Discord app running on this PC."),
+            active=self.settings.get("discord_rpc", True))
+        self.discord_rpc_row.connect("notify::active", lambda *_: self.store())
+        discord.add(self.discord_rpc_row)
+        self.discord_accept_row = Adw.SwitchRow(
+            title=tr("Accept people who ask to join"),
+            subtitle=tr("When someone presses \"Ask to Join\" on your profile, they get the same as from an invite of "
+                        "yours (your nickname and your server)."),
+            active=self.settings.get("discord_accept_requests", True))
+        self.discord_accept_row.connect("notify::active", lambda *_: self.store())
+        discord.add(self.discord_accept_row)
+        self.discord_status_row = Adw.ActionRow(title=tr("Connection"))
+        discord.add(self.discord_status_row)
+        page.add(discord)
 
         console = Adw.PreferencesGroup(title=tr("Console"))
         self.neo_row = Adw.SwitchRow(title=tr("PS4 Pro mode"),
@@ -489,6 +614,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         s["vk_validation"] = self.validation_row.get_active()
         s["extra_env"] = self.env_row.get_text()
         s["ui_language"] = combo_value(self.ui_language_row)
+        s["discord_rpc"] = self.discord_rpc_row.get_active()
+        s["discord_accept_requests"] = self.discord_accept_row.get_active()
         save_settings(s)
         self.ini, self.ini_lines = load_ini()
         for key, row in self.patch_rows.items():
@@ -516,6 +643,543 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def environment(self):
         return game_environment(self.settings)
+
+    def set_ini(self, changes):
+        """Writes some bbport.ini keys at once (None removes a line: the default again),
+        keeping whatever the in-game menu changed meanwhile."""
+        self.ini, self.ini_lines = load_ini()
+        self.ini.update(changes)
+        save_ini(self.ini, self.ini_lines)
+        self.ini, self.ini_lines = load_ini()
+
+    def ini_has(self, key):
+        """Whether bbport.ini has its own line for key (a binding of the player's)."""
+        return any(line.split("=", 1)[0].strip() == key for line in self.ini_lines
+                   if "=" in line and not line.lstrip().startswith("#"))
+
+    # --- controls page -------------------------------------------------------------------
+
+    def build_controls_page(self):
+        page = Adw.PreferencesPage()
+        controls = Adw.PreferencesGroup(title=tr("Controller"),
+                                        description=tr("Any connected gamepad plus the keyboard; the one used last takes over. "
+                                                       "Split-screen ports are assigned in the in-game menu (Insert / L3+R3)."))
+        pads = connected_gamepads()
+        choices = [(tr("First connected"), "")] + [(name, guid) for guid, name in pads]
+        if self.settings["gamepad"] and self.settings["gamepad"] not in [g for g, _ in pads]:
+            choices.append((tr("{} (not connected)").format(self.settings["gamepad_name"] or self.settings["gamepad"]), self.settings["gamepad"]))
+        self.gamepad_row = combo_row(tr("Controller"), None, choices, self.settings["gamepad"])
+        controls.add(self.gamepad_row)
+        page.add(controls)
+
+        # Bindings: "Change" waits for a key or button in a small window (bb-gpu-capabilities
+        # --read-input, the same names the game reads). Grey: the game's default.
+        self.binding_rows = {}
+        for kind, title, description, inputs in (
+                ("pad", tr("Gamepad buttons"),
+                 tr("Player 1's buttons on Xbox, PlayStation, Switch Pro and generic controllers. Saved in bbport.ini, "
+                    "used from the next start."), PAD_INPUTS),
+                ("key", tr("Keyboard"),
+                 tr("Player 1's keys; the keyboard works together with the controller. Each action takes up to 4 keys "
+                    "(Change adds one to your own; Default goes back to the game's). Insert opens the in-game menu, "
+                    "so it cannot be bound."), KEY_INPUTS)):
+            group = Adw.PreferencesGroup(title=title, description=description)
+            for name, label, default in inputs:
+                row = Adw.ActionRow(title=tr(label))
+                change = Gtk.Button(label=tr("Change"), valign=Gtk.Align.CENTER)
+                change.connect("clicked", lambda _b, k=kind, n=name: self.capture_binding(k, n))
+                row.add_suffix(change)
+                row.add_suffix(flat_button("edit-clear-symbolic", tr("No key or button"),
+                                           lambda _b, k=kind, n=name: self.set_binding(k, n, "")))
+                row.add_suffix(flat_button("edit-undo-symbolic", tr("Default"),
+                                           lambda _b, k=kind, n=name: self.set_binding(k, n, None)))
+                group.add(row)
+                self.binding_rows[(kind, name)] = (row, default)
+                self.show_binding(kind, name)
+            reset = Adw.ActionRow(title=tr("Restore all"))
+            reset_button = Gtk.Button(label=tr("Restore"), valign=Gtk.Align.CENTER)
+            reset_button.connect("clicked", lambda _b, k=kind, i=inputs: self.set_ini(
+                {f"{k}.{name}": None for name, _l, _d in i}) or self.show_bindings())
+            reset.add_suffix(reset_button)
+            group.add(reset)
+            if kind == "pad":
+                preset = Adw.ActionRow(title=tr("D-pad down = L2 (use item)"),
+                                       subtitle=tr("Swaps D-pad down with the L2 trigger: items on the down arrow"))
+                preset_button = Gtk.Button(label=tr("Apply"), valign=Gtk.Align.CENTER)
+                preset_button.connect("clicked", lambda _b: self.set_ini(
+                    {"pad.l2": "dpdown", "pad.down": "lefttrigger"}) or self.show_bindings())
+                preset.add_suffix(preset_button)
+                group.add(preset)
+            page.add(group)
+        return page
+
+    def binding_text(self, kind, value):
+        names = [n.strip() for n in value.split(",") if n.strip()]
+        if kind == "pad":
+            names = [PAD_LABELS.get(n, n) for n in names]
+        return "  /  ".join(names)
+
+    def show_binding(self, kind, name):
+        row, default = self.binding_rows[(kind, name)]
+        key = f"{kind}.{name}"
+        if self.ini_has(key):
+            value = self.ini.get(key, "")
+            row.set_subtitle(GLib.markup_escape_text(self.binding_text(kind, value)) if value.strip()
+                             else tr("(none)"))
+        else:
+            row.set_subtitle("<span alpha='60%'>" + GLib.markup_escape_text(
+                tr("{} (default)").format(self.binding_text(kind, default))) + "</span>")
+
+    def show_bindings(self):
+        for kind, name in self.binding_rows:
+            self.show_binding(kind, name)
+
+    def set_binding(self, kind, name, value):
+        """value: the binding, "" for none, None for the game's default."""
+        self.set_ini({f"{kind}.{name}": value})
+        self.show_binding(kind, name)
+
+    def capture_binding(self, kind, name):
+        tool = PORT_DIR / ("bin" if PACKAGED else "out") / "bb-gpu-capabilities"
+        try:
+            process = Gio.Subprocess.new([str(tool), "--read-input", kind], Gio.SubprocessFlags.STDOUT_PIPE)
+        except GLib.Error as error:
+            self.toasts.add_toast(Adw.Toast(title=tr("Could not start: {}").format(error.message)))
+            return
+        row, _default = self.binding_rows[(kind, name)]
+        row.set_subtitle(tr("Press a gamepad button… (Escape cancels)") if kind == "pad"
+                         else tr("Press a key… (Escape cancels)"))
+
+        def done(proc, result):
+            try:
+                _ok, out, _err = proc.communicate_utf8_finish(result)
+            except GLib.Error:
+                out = ""
+            words = (out or "").strip().split(" ", 1)
+            if len(words) != 2 or words[0] != kind:
+                self.show_binding(kind, name)
+                return
+            got = words[1]
+            key = f"{kind}.{name}"
+            self.ini, self.ini_lines = load_ini()
+            # A key replaces the default binding; on the player's own one it is added (up to 4).
+            current = [n.strip() for n in self.ini.get(key, "").split(",") if n.strip()] if self.ini_has(key) else []
+            if kind == "pad":
+                current = []  # a button replaces, as in the Windows launcher
+            if got not in current:
+                current.append(got)
+            self.set_binding(kind, name, ",".join(current[-MAX_KEYS:]))
+        process.communicate_utf8_async(None, None, done)
+
+    # --- DLC page ----------------------------------------------------------------------------
+
+    def dlc_dir(self):
+        return DATA_DIR / "dlc"
+
+    def build_dlc_page(self):
+        page = Adw.PreferencesPage()
+        intro = Adw.PreferencesGroup(
+            title=tr("DLC"),
+            description=tr("Optional: the game runs the same without DLC. CTR Nitro-Fueled's DLC only carry the license "
+                           "(the content is already in the game); the port reports them installed at start. Use your own "
+                           "PS4 DLC packages (.pkg) for CUSA13795: they are copied into the dlc folder, your files are not "
+                           "changed. Changes apply the next time you press Play."))
+        self.dlc_row = Adw.SwitchRow(title=tr("Enable DLC"), active=self.settings.get("dlc", True))
+        self.dlc_row.connect("notify::active", lambda *_: self.on_dlc_enabled())
+        intro.add(self.dlc_row)
+        actions = Adw.ActionRow(title=tr("Add DLC (.pkg)…"), subtitle=str(self.dlc_dir()))
+        add = Gtk.Button(label=tr("Add"), valign=Gtk.Align.CENTER)
+        add.add_css_class("suggested-action")
+        add.connect("clicked", self.on_add_dlc)
+        actions.add_suffix(add)
+        actions.add_suffix(flat_button("folder-symbolic", tr("Open the dlc folder"),
+                                       lambda _b: open_folder(self, self.dlc_dir())))
+        actions.add_suffix(flat_button("view-refresh-symbolic", tr("Refresh"), lambda _b: self.fill_dlc()))
+        intro.add(actions)
+        page.add(intro)
+        self.dlc_page = page
+        self.dlc_group = None
+        self.fill_dlc()
+        return page
+
+    def fill_dlc(self):
+        if self.dlc_group is not None:
+            self.dlc_page.remove(self.dlc_group)
+        self.dlc_group = Adw.PreferencesGroup(title=tr("DLC found"))
+        disabled = {x.strip() for x in self.settings.get("dlc_disabled", "").split(",") if x.strip()}
+        items = []
+        if self.dlc_dir().is_dir():
+            for path in sorted(self.dlc_dir().iterdir()):
+                if content_profile.is_candidate(path):
+                    items.append((path, *content_profile.describe_addon(path, "CUSA13795")))
+        if not items:
+            self.dlc_group.add(Adw.ActionRow(title=tr("No DLC in the dlc folder")))
+        for path, label, title, problem in sorted(items, key=lambda i: i[2].lower()):
+            if problem:
+                row = Adw.ActionRow(title=GLib.markup_escape_text(path.name), subtitle=GLib.markup_escape_text(problem))
+                row.add_prefix(Gtk.Image(icon_name="dialog-warning-symbolic"))
+            else:
+                row = Adw.SwitchRow(title=GLib.markup_escape_text(title), subtitle=label, active=label not in disabled)
+                row.connect("notify::active", lambda r, *_a, lb=label: self.on_dlc_toggled(lb, r.get_active()))
+            row.add_suffix(flat_button("user-trash-symbolic", tr("Remove"), lambda _b, p=path: self.confirm_remove_dlc(p)))
+            self.dlc_group.add(row)
+        self.dlc_group.set_sensitive(self.settings.get("dlc", True))
+        self.dlc_page.add(self.dlc_group)
+
+    def on_dlc_enabled(self):
+        self.settings["dlc"] = self.dlc_row.get_active()
+        save_settings(self.settings)
+        if self.dlc_group is not None:
+            self.dlc_group.set_sensitive(self.settings["dlc"])
+
+    def on_dlc_toggled(self, label, on):
+        disabled = [x.strip() for x in self.settings.get("dlc_disabled", "").split(",") if x.strip() and x.strip() != label]
+        if not on:
+            disabled.append(label)
+        self.settings["dlc_disabled"] = ",".join(disabled)
+        save_settings(self.settings)
+
+    def on_add_dlc(self, _button):
+        dialog = Gtk.FileDialog(title=tr("PS4 DLC packages (.pkg)"), modal=True)
+        pkg = Gtk.FileFilter(name=tr("PS4 DLC (*.pkg)"))
+        pkg.add_pattern("*.pkg")
+        pkg.add_pattern("*.PKG")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(pkg)
+        dialog.set_filters(filters)
+
+        def done(dialog, result):
+            try:
+                files = dialog.open_multiple_finish(result)
+            except GLib.Error:
+                return
+            added, problems = 0, []
+            self.dlc_dir().mkdir(parents=True, exist_ok=True)
+            for i in range(files.get_n_items()):
+                source = Path(files.get_item(i).get_path())
+                _label, _title, problem = content_profile.describe_addon(source, "CUSA13795")
+                if problem:
+                    problems.append(f"{source.name}: {problem}")
+                    continue
+                try:
+                    (self.dlc_dir() / source.name).write_bytes(source.read_bytes())
+                    added += 1
+                except OSError as error:
+                    problems.append(f"{source.name}: {error}")
+            self.toasts.add_toast(Adw.Toast(title=tr("DLC added: {}").format(added) +
+                                            (". " + "; ".join(problems) if problems else ""), timeout=8))
+            self.fill_dlc()
+        dialog.open_multiple(self, None, done)
+
+    def confirm(self, heading, body, action, on_yes):
+        """A yes/no question; on_yes runs on yes."""
+        if hasattr(Adw, "AlertDialog"):
+            dialog = Adw.AlertDialog(heading=heading, body=body)
+            dialog.add_response("cancel", tr("Cancel"))
+            dialog.add_response("yes", action)
+            dialog.set_response_appearance("yes", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.connect("response", lambda _d, r: on_yes() if r == "yes" else None)
+            dialog.present(self)
+        else:
+            dialog = Adw.MessageDialog(transient_for=self, heading=heading, body=body)
+            dialog.add_response("cancel", tr("Cancel"))
+            dialog.add_response("yes", action)
+            dialog.set_response_appearance("yes", Adw.ResponseAppearance.DESTRUCTIVE)
+            dialog.connect("response", lambda _d, r: on_yes() if r == "yes" else None)
+            dialog.present()
+
+    def confirm_remove_dlc(self, path):
+        def remove():
+            try:
+                if path.is_dir():
+                    import shutil
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            except OSError as error:
+                self.toasts.add_toast(Adw.Toast(title=str(error)))
+            self.fill_dlc()
+        self.confirm(tr("Remove {} from the dlc folder?").format(path.name),
+                     tr("Only the port's copy is deleted."), tr("Remove"), remove)
+
+    # --- online: nickname, Discord account, presence, invites, announcements ----------------
+
+    def server(self):
+        return self.server_row.get_text().strip() or ONLINE_SERVER
+
+    def nick(self):
+        return self.nick_row.get_text().strip()
+
+    def in_thread(self, work, done):
+        """work() on a worker thread, then done(result) on the window's."""
+        import threading
+
+        def run():
+            result = work()
+            GLib.idle_add(lambda: done(result) and False)
+        threading.Thread(target=run, daemon=True).start()
+
+    def nick_changed(self):
+        """A nickname or server typed: asked again once typing stops."""
+        if self.nick_timer:
+            GLib.source_remove(self.nick_timer)
+
+        def ask():
+            self.nick_timer = 0
+            self.ask_nick_status()
+            return False
+        self.nick_timer = GLib.timeout_add(700, ask)
+
+    def ask_nick_status(self):
+        server, nick = self.server(), self.nick()
+        asked = f"{server}|{nick}"
+        self.nick_asked = asked
+        self.nick_info = None
+        self.show_nick_status()
+
+        def done(info):
+            if self.nick_asked == asked:
+                self.nick_info = info or {}
+                self.show_nick_status()
+        self.in_thread(lambda: ryunet_http.nick_status(DATA_DIR, server, nick if nick_ok(nick) else ""), done)
+
+    def show_nick_status(self):
+        nick, info = self.nick(), self.nick_info
+        link_available = bool(info and info.get("discord_link"))
+        status = (info or {}).get("status", "")
+        linked = bool(info and info.get("linked"))
+        if self.discord_busy:
+            text = tr("Authorize your account in the Discord tab that opened in the browser…")
+        elif not nick_ok(nick):
+            text = tr("Choose a nickname: 3 to 16 letters, digits, _ or - (not RyuPC or Player)")
+        elif info is None:
+            text = tr("Checking the nickname with the server…")
+        elif status == "free":
+            text = tr("Available: it becomes yours the first time you play online.")
+        elif status == "yours" and linked:
+            text = tr("This nickname is yours. Discord account: {}").format(info.get("discord") or "?")
+        elif status == "yours":
+            text = tr("This nickname is yours.")
+        elif status == "taken" and linked:
+            text = tr("That nickname is linked to a Discord account. If it is yours, press Recover with Discord; "
+                      "otherwise choose another one.")
+        elif status == "taken":
+            text = tr("Someone else already uses that nickname: choose another one.")
+        elif status in ("reserved", "invalid"):
+            text = tr("The server does not accept that nickname: choose another one.")
+        else:
+            text = tr("The server could not be asked (it checks again when you play).")
+        self.nick_status_row.set_subtitle(GLib.markup_escape_text(text))
+        idle = not self.discord_busy
+        self.discord_link_button.set_visible(link_available and idle and nick_ok(nick) and status in ("free", "yours")
+                                             and not linked)
+        self.discord_recover_button.set_visible(link_available and idle and (
+            not nick_ok(nick) or status == "free" or (status == "taken" and linked)))
+        self.discord_unlink_button.set_visible(link_available and idle and status == "yours" and linked)
+
+    def discord_app_id(self):
+        return self.settings.get("discord_app_id") or DISCORD_APP_ID
+
+    def start_discord_link(self, mode):
+        """mode: "link" this nickname, or "recover" the one linked to the Discord account."""
+        if self.discord_busy:
+            return
+        self.store()
+        server, app_id = self.server(), self.discord_app_id()
+        nick = self.nick() if mode == "link" else ""
+        self.discord_busy = True
+        self.show_nick_status()
+
+        def open_url(url):
+            GLib.idle_add(lambda: Gio.AppInfo.launch_default_for_uri(url, None) and False)
+
+        def work():
+            auth = discord_oauth.authorize(app_id, open_url)
+            if not auth.get("ok"):
+                return auth, None
+            return auth, ryunet_http.discord_link(DATA_DIR, server, nick, auth["code"], auth["redirect_uri"])
+
+        def done(result):
+            auth, answer = result
+            self.discord_busy = False
+            message, use = self.discord_link_message(nick, auth, answer)
+            if use and nick_ok(use):
+                self.nick_row.set_text(use)
+                self.store()
+            self.toasts.add_toast(Adw.Toast(title=message, timeout=10))
+            self.ask_nick_status()
+        self.in_thread(work, done)
+
+    @staticmethod
+    def discord_link_message(nick, auth, answer):
+        """(message, nickname to put in the field or "") for an authorization's outcome."""
+        if not auth.get("ok"):
+            error = auth.get("error")
+            if error == "denied":
+                return tr("You cancelled the authorization in Discord."), ""
+            if error == "busy":
+                return tr("Ports 53134 to 53136 are in use: close other open launchers."), ""
+            if error == "timeout":
+                return tr("Discord's authorization did not arrive in time (3 minutes)."), ""
+            return tr("Could not authorize with Discord."), ""
+        if not answer:
+            return tr("Could not reach the server."), ""
+        status, account, named = answer.get("status"), answer.get("discord", ""), answer.get("nick", "")
+        if status == "linked":
+            return tr("Done: {} is linked to your Discord account {}. If you reinstall or change PC, press Recover "
+                      "with Discord.").format(nick, account), ""
+        if status == "recovered":
+            got = named or nick
+            return tr("Recovered: {} is yours again on this installation (Discord: {}).").format(got, account), got
+        if status == "own_nick":
+            return tr("This installation already had the nickname {}, not linked to Discord. It is filled in: press "
+                      "Link with Discord to recover it on any PC.").format(named), named
+        if status == "no_nick":
+            return tr("Your Discord account {} has no nickname linked on this server: type one and press Link with "
+                      "Discord.").format(account), ""
+        if status == "other_nick":
+            return tr("Your Discord account already has the nickname {} (one per account): it is filled in.").format(named), named
+        if status == "taken":
+            return tr("That nickname belongs to someone else or to another Discord account."), ""
+        if status in ("invalid", "reserved"):
+            return tr("The server did not accept the request."), ""
+        return tr("The server could not confirm the account with Discord. Try again."), ""
+
+    def confirm_discord_unlink(self):
+        server, nick = self.server(), self.nick()
+
+        def unlink():
+            def done(ok):
+                self.toasts.add_toast(Adw.Toast(title=tr("Nickname unlinked from Discord.") if ok
+                                                else tr("Could not unlink.")))
+                self.ask_nick_status()
+            self.in_thread(lambda: ryunet_http.discord_unlink(DATA_DIR, server, nick), done)
+        self.confirm(tr("Unlink {} from Discord?").format(nick),
+                     tr("You can change the nickname afterwards, but can no longer recover it with Discord if you "
+                        "reinstall."), tr("Unlink"), unlink)
+
+    def discord_activity(self):
+        """What Discord shows while the game runs; joinable online (the Windows launcher's)."""
+        if self.process is None:
+            return None
+        nick, server = self.ini.get("online_name", "").strip(), self.ini.get("online_server", ONLINE_SERVER).strip()
+        if self.ini.get("online") != "1":
+            return discord_ipc.Activity(tr("Playing offline"), start=self.game_started, large_image="logo",
+                                        large_text="Crash Team Racing Nitro-Fueled")
+        activity = discord_ipc.Activity(tr("Playing online"), state=tr("Nickname: {}").format(nick) if nick else "",
+                                        start=self.game_started, large_image="logo",
+                                        large_text="Crash Team Racing Nitro-Fueled")
+        if nick_ok(nick) and ryunet_http.valid_server(server):
+            players, maximum = self.party or (1, 8)  # a server without /ryunet/party: offer it anyway
+            if 0 < players <= maximum:
+                activity.party_id = f"ctr:{server.lower()}:{nick.lower()}"
+                activity.party_size, activity.party_max = players, maximum
+                if players < maximum:
+                    activity.join_secret = f"ctr1|{server}|{nick}"
+        return activity
+
+    def poll_party(self):
+        """The lobby this player hosts, every 5 s while the game runs online: Discord's
+        "1 of 8" follows players joining and leaving."""
+        if self.process is None or self.ini.get("online") != "1" or self.party_busy:
+            return
+        if time.monotonic() - self.party_asked < 5:
+            return
+        self.party_busy, self.party_asked = True, time.monotonic()
+        server, nick = self.ini.get("online_server", ONLINE_SERVER), self.ini.get("online_name", "")
+
+        def done(answer):
+            self.party_busy = False
+            self.party = answer
+        self.in_thread(lambda: ryunet_http.party(DATA_DIR, server, nick), done)
+
+    def poll_announcement(self):
+        """Server announcements ("maintenance in 5 minutes"), every 30 s while online play is on:
+        a new one goes to the game in ryunet_announce.txt next to bbport.ini (drawn over the
+        picture) and to a toast."""
+        if self.ini.get("online") != "1" or self.announce_busy or time.monotonic() - self.announce_asked < 30:
+            return
+        self.announce_busy, self.announce_asked = True, time.monotonic()
+        server = self.ini.get("online_server", ONLINE_SERVER)
+
+        def done(answer):
+            self.announce_busy = False
+            if not answer or str(answer.get("id")) == self.announce_seen:
+                return
+            self.announce_seen = str(answer.get("id"))
+            text = str(answer.get("text", "")).replace("\n", " ")
+            try:
+                expires = int(time.time()) + int(answer.get("expires_in", 0))
+                (ini_path().parent / "ryunet_announce.txt").write_text(
+                    f"id={self.announce_seen}\nlevel={answer.get('level', '')}\nexpires={expires}\ntext={text}\n",
+                    encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+            self.toasts.add_toast(Adw.Toast(title=tr("Server notice: {}").format(text), timeout=10))
+        self.in_thread(lambda: ryunet_http.announcement(DATA_DIR, server), done)
+
+    def on_discord_join(self, secret):
+        """A join secret from Discord: "ctr1|<server>|<nickname>"."""
+        parts = secret.split("|")
+        if len(parts) != 3 or parts[0] != "ctr1" or not ryunet_http.valid_server(parts[1]) or not nick_ok(parts[2]):
+            self.toasts.add_toast(Adw.Toast(title=tr("That Discord invite is not from this launcher.")))
+            return
+        server, nick = parts[1], parts[2]
+        if nick.lower() == self.ini.get("online_name", "").lower():
+            return  # our own invite
+        self.present()
+        if server.lower() != self.ini.get("online_server", ONLINE_SERVER).strip().lower():
+            # Never switch servers silently: a crafted invite could send us to any server.
+            self.confirm(tr("Invite from {}").format(nick),
+                         tr("It is for the server {} and you use {}. Only switch if you trust that server: it will see "
+                            "your nickname and your online play.").format(server, self.ini.get("online_server", ONLINE_SERVER)),
+                         tr("Switch server and join"), lambda: self.accept_join(server, nick))
+            return
+        self.accept_join(server, nick)
+
+    def accept_join(self, server, nick):
+        """The host becomes a friend (the game lists friends' lobbies as joinable) and the game
+        joins their session by itself, as a PS4 invitation accepted in the system UI
+        (src/runtime_services.c reads ryunet_join.txt next to bbport.ini)."""
+        self.ini, self.ini_lines = load_ini()
+        friends = [f.strip() for f in self.ini.get("online_friends", "").split(",") if f.strip()]
+        if nick.lower() not in [f.lower() for f in friends]:
+            friends.append(nick)
+        self.set_ini({"online": "1", "online_server": server, "online_friends": ",".join(friends)})
+        self.online_row.set_active(True)
+        self.server_row.set_text(server)
+        self.friends_row.set_text(",".join(friends))
+        try:
+            (ini_path().parent / "ryunet_join.txt").write_text(
+                f"session=cusa13795-session-{nick}\nhost={nick}\ntime={int(time.time())}\n", encoding="utf-8")
+        except OSError:
+            pass
+        if self.process is not None:
+            self.toasts.add_toast(Adw.Toast(title=tr("{}'s invite accepted: the game joins their match in a few seconds. "
+                                                     "If it does not, open Friends in the game and join {}.").format(nick, nick),
+                                            timeout=10))
+            return
+        self.toasts.add_toast(Adw.Toast(title=tr("{}'s invite accepted: the game starts and joins their match (if not, "
+                                                 "open Friends and join {}).").format(nick, nick), timeout=10))
+        if self.launch_button.get_sensitive():
+            self.on_launch(None)
+
+    def tick(self):
+        """Every second: Discord's presence and its invites, the party size, announcements."""
+        self.presence.accept_requests = self.settings.get("discord_accept_requests", True)
+        self.presence.update(self.settings.get("discord_rpc", True), self.discord_app_id(), self.discord_activity())
+        while (secret := self.presence.take_join()) is not None:
+            self.on_discord_join(secret)
+        self.poll_party()
+        self.poll_announcement()
+        status, error = self.presence.status()
+        text = {discord_ipc.CONNECTED: tr("Connected to Discord."),
+                discord_ipc.NO_DISCORD: tr("Discord is not running; it connects on its own once you open it."),
+                discord_ipc.NO_APP_ID: tr("The Discord application ID is missing."),
+                discord_ipc.ERROR: tr("Discord refused the connection: {}").format(error),
+                discord_ipc.OFF: tr("Off") if not self.settings.get("discord_rpc", True) else tr("Connecting…")}[status]
+        self.discord_status_row.set_subtitle(GLib.markup_escape_text(text))
+        return True
 
     # --- log page and process ------------------------------------------------------------
 
@@ -659,6 +1323,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.toasts.add_toast(Adw.Toast(title=tr("Could not start: {}").format(error.message)))
             return
         self.stream = Gio.DataInputStream.new(self.process.get_stdout_pipe())
+        self.game_started = int(time.time())
+        self.party, self.party_asked = None, 0.0
         self.read_line()
         self.process.wait_async(None, self.on_exit)
         self.update_launch_button()
@@ -703,6 +1369,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             pass
         status = process.get_exit_status() if process.get_if_exited() else -1
         self.process = None
+        self.game_started = 0
+        self.party = None
         self.reload_game_settings()
         self.update_launch_button()
         self.update_game_status()
@@ -712,6 +1380,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.store()
         if self.process:
             self.stop_game()
+        self.presence.shutdown()  # clears the Discord status
         return False
 
 
