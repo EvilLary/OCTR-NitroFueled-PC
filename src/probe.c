@@ -13,6 +13,7 @@
 #endif
 #ifdef _WIN32
 #include <windows.h>
+#include <signal.h>
 #else
 #include <sys/mman.h>
 #include <malloc.h>
@@ -32,6 +33,7 @@ typedef struct { uint64_t target, kind, value, addend; } Reloc;
 static char (*names)[128];
 static uint64_t import_count;
 static unsigned char *image;
+static size_t image_bytes; /* the size of the guest image (crash reports) */
 static size_t page_size;
 typedef struct { uint64_t base, size, init, tls_address, tls_memsz, tls_filesz, tls_module; } LinkedModule;
 static LinkedModule modules[16];
@@ -149,6 +151,40 @@ static void describe_address(char *out, size_t size, uintptr_t address) {
     }
     snprintf(out,size,"%p",(void *)address);
 }
+int runtime_memory_vma_info(uintptr_t address, int *prot, int *type, uintptr_t *end);
+/* SacredFire: an address in a crash report: the module or guest offset, what Windows has there
+ * (free, reserved, committed and its protection) and the guest mapping over it, if any. */
+static void describe_memory(const char *label, uintptr_t address) {
+    char where[MAX_PATH+64];
+    describe_address(where,sizeof(where),address);
+    MEMORY_BASIC_INFORMATION m;
+    const char *state="unknown";
+    unsigned long protect=0;
+    if (VirtualQuery((void *)address,&m,sizeof(m))) {
+        state=m.State==MEM_FREE ? "free (never mapped, or unmapped)" : m.State==MEM_RESERVE ? "reserved, not committed" : "committed";
+        protect=m.Protect;
+    }
+    int prot=0,type=0; uintptr_t end=0;
+    const int guest=runtime_memory_vma_info(address,&prot,&type,&end);
+    fprintf(stderr,"  %s %p (%s): %s, protection 0x%lx; guest mapping: ",label,(void *)address,where,state,protect);
+    if (guest) fprintf(stderr,"prot 0x%x, type %d, up to %p\n",prot,type,(void *)end);
+    else fprintf(stderr,"none\n");
+    if (address<0x10000) fprintf(stderr,"  (a null pointer plus 0x%" PRIxPTR ": a field of an object that does not exist)\n",address);
+    else if (address>>47) fprintf(stderr,"  (not a valid pointer: freed or overwritten memory read as one)\n");
+}
+/* abort(), a C runtime invalid parameter and a pure virtual call end the process with code 3
+ * and no report of their own: they raise this, which the fault handler reports like a crash. */
+#define BB_ABORT_EXCEPTION 0xE0AB0003u
+static void raise_abort(const char *what) {
+    ULONG_PTR arg=(ULONG_PTR)what;
+    RaiseException(BB_ABORT_EXCEPTION,EXCEPTION_NONCONTINUABLE,1,&arg);
+}
+static void on_abort_signal(int sig) { (void)sig; raise_abort("an assertion, or an uncaught C++ exception: see the lines above"); }
+static void on_invalid_parameter(const wchar_t *expression, const wchar_t *function, const wchar_t *file, unsigned line, uintptr_t reserved) {
+    (void)expression; (void)function; (void)file; (void)line; (void)reserved;
+    raise_abort("invalid parameter to a C runtime function");
+}
+static void on_purecall(void) { raise_abort("pure virtual function call"); }
 static int fatal_reported;
 static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     if (__atomic_exchange_n(&fatal_reported,1,__ATOMIC_ACQ_REL)) { Sleep(INFINITE); }
@@ -160,10 +196,43 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
         fprintf(stderr,"Fault: %s access to %p at %s (thread %lu)\n",
                 record->ExceptionInformation[0]==1 ? "write" : record->ExceptionInformation[0]==8 ? "execute" : "read",
                 (void *)record->ExceptionInformation[1],where,GetCurrentThreadId());
+    else if (record->ExceptionCode==BB_ABORT_EXCEPTION)
+        fprintf(stderr,"Fault: abort() called (%s) at %s (thread %lu)\n",
+                record->NumberParameters ? (const char *)record->ExceptionInformation[0] : "?",where,GetCurrentThreadId());
     else
         fprintf(stderr,"Fault: exception 0x%08lx at %s (thread %lu)\n",record->ExceptionCode,where,GetCurrentThreadId());
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
+    fprintf(stderr,"  r8=%016llx r9=%016llx r10=%016llx r11=%016llx\n  r12=%016llx r13=%016llx r14=%016llx r15=%016llx rip=%016llx\n",
+            c->R8,c->R9,c->R10,c->R11,c->R12,c->R13,c->R14,c->R15,c->Rip);
+    /* SacredFire: what the faulting address is (never mapped, freed, read-only) and the bytes of
+     * the faulting instruction, to read the crash without a debugger. */
+    if (record->ExceptionCode==EXCEPTION_ACCESS_VIOLATION && record->NumberParameters>=2)
+        describe_memory("fault address",(uintptr_t)record->ExceptionInformation[1]);
+    {
+        unsigned char code[24]; SIZE_T got=0;
+        if (c->Rip && ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)c->Rip,code,sizeof(code),&got) && got) {
+            fprintf(stderr,"  code at rip:");
+            for (SIZE_T i=0;i<got;++i) fprintf(stderr," %02x",code[i]);
+            fprintf(stderr,"\n");
+        }
+    }
+    /* Guest return addresses on the stack: the frame chain of guest code often breaks (a leaf
+     * function, a frame without rbp), these still name the callers. */
+    if (image) {
+        uintptr_t stack[512]; SIZE_T got=0;
+        ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)c->Rsp,stack,sizeof(stack),&got);
+        int shown=0;
+        for (SIZE_T i=0;i<got/sizeof(stack[0]) && shown<16;++i) {
+            const uintptr_t v=stack[i];
+            if (v-(uintptr_t)image<image_bytes && v>(uintptr_t)image+0x80) {
+                if (!shown) fprintf(stderr,"  guest code addresses on the stack (callers, newest first):");
+                fprintf(stderr," 0x%" PRIxPTR "@rsp+0x%zx",v-(uintptr_t)image,(size_t)(i*sizeof(stack[0])));
+                ++shown;
+            }
+        }
+        if (shown) fprintf(stderr,"\n");
+    }
     if (gpu_enabled) bbgpu_dump_guest_writes(info);
     /* SacredFire: the thread's name and its native call chain from the unwind tables (drivers and
      * system DLLs keep no frame pointers; this names the call into them). Guest frames have no
@@ -479,6 +548,7 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     }
     /* BB_STRICT_HANDLES=1: a closed or invalid handle used anywhere is reported (diagnostics). */
     if (code==0xC0000008 /* STATUS_INVALID_HANDLE */) return fatal_exception(info);
+    if (code==BB_ABORT_EXCEPTION) return fatal_exception(info);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
@@ -830,6 +900,9 @@ int main(int argc, char **argv) {
     SYSTEM_INFO system_info; GetSystemInfo(&system_info); page_size = system_info.dwPageSize;
     AddVectoredExceptionHandler(1, vectored_fault);
     SetUnhandledExceptionFilter(unhandled_fault);
+    signal(SIGABRT, on_abort_signal);
+    _set_invalid_parameter_handler(on_invalid_parameter);
+    _set_purecall_handler(on_purecall);
     if (getenv("BB_STRICT_HANDLES")) {
         PROCESS_MITIGATION_STRICT_HANDLE_CHECK_POLICY strict={0};
         strict.RaiseExceptionOnInvalidHandleReference=1;
@@ -950,6 +1023,7 @@ int main(int argc, char **argv) {
         }
     }
     image = allocate(round_page(size));
+    image_bytes = size;
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {
