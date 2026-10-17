@@ -346,6 +346,11 @@ class LauncherWindow(Adw.ApplicationWindow):
         online.add(self.nick_row)
         self.server_row = Adw.EntryRow(title=tr("Server"), text=self.ini.get("online_server") or ONLINE_SERVER)
         online.add(self.server_row)
+        # The friends whose rooms the game lists under Friends (online_friends in bbport.ini,
+        # the Windows launcher's Friends field).
+        self.friends_row = Adw.EntryRow(title=tr("Friends: their nicknames, separated by commas"),
+                                        text=self.ini.get("online_friends", ""))
+        online.add(self.friends_row)
         self.inventory_row = combo_row(tr("Pit Stop items"), None, [(tr(label), value) for label, value in INVENTORIES],
                                        self.ini.get("online_inventory", "server"))
         online.add(self.inventory_row)
@@ -493,6 +498,8 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
         self.ini["online_name"] = self.nick_row.get_text().strip()
         self.ini["online_server"] = self.server_row.get_text().strip() or ONLINE_SERVER
+        friends = [name.strip() for name in self.friends_row.get_text().split(",")]
+        self.ini["online_friends"] = ",".join(name for name in friends if name)
         self.ini["online_inventory"] = combo_value(self.inventory_row)
         save_ini(self.ini, self.ini_lines)
         self.ini, self.ini_lines = load_ini()
