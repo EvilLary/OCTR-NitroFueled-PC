@@ -4474,9 +4474,11 @@ void MigrateOldLauncher() {
     std::error_code ec;
     const fs::path self = LauncherExe();
     const fs::path old_exe = a.root / kOldLauncherExe;
-    if (self.filename() == kOldLauncherExe || !fs::is_regular_file(old_exe, ec)) return;
-    if (fs::file_size(old_exe, ec) != fs::file_size(self, ec) || ReadText(old_exe) != ReadText(self))
+    if (self.filename() == kOldLauncherExe) return;
+    if (fs::is_regular_file(old_exe, ec) &&
+        (fs::file_size(old_exe, ec) != fs::file_size(self, ec) || ReadText(old_exe) != ReadText(self)))
         fs::copy_file(self, old_exe, fs::copy_options::overwrite_existing, ec);
+    // The desktop shortcut too when the old executable is already gone (deleted by hand).
     wchar_t desktop[MAX_PATH];
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop))) return;
     const fs::path old_link = fs::path(desktop) / kOldShortcut;
