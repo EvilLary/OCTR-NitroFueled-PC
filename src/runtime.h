@@ -88,6 +88,8 @@ uintptr_t runtime_services_resolve(const char *name);
 /* SacredFire: 16:9 videos and cutscenes in ultrawide (runtime_cinematic.c). */
 void runtime_cinematic_start(const unsigned char *image);
 void runtime_cinematic_video(int delta); /* +1 a video file opened, -1 closed */
+int runtime_cinematic_cutscene(void); /* 1 while a cutscene plays (not a race's fly-over) */
+void runtime_cinematic_cutscene_fill(void); /* cutscenes get a 16:9 field of view, not a crop */
 /* SacredFire: ultrawide title and customization screens (runtime_frontend.c). */
 void runtime_frontend_start(const unsigned char *image);
 void runtime_file_report(void);
