@@ -160,6 +160,8 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
     BbStats::vk_image_bytes.fetch_add(size_bytes, std::memory_order_relaxed);
+    Vulkan::Breadcrumbs::NoteImageCreated(Vulkan::Breadcrumbs::HandleId(image), image_ci.extent.width,
+                                          image_ci.extent.height, u32(image_ci.format), size_bytes);
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,

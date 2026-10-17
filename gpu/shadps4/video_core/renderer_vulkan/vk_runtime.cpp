@@ -932,9 +932,22 @@ void Runtime::FlushBarriers() {
     }
 
     scheduler.EndRendering();
-    scheduler.Record([memory = memory_barrier, has_memory = dep_info.memoryBarrierCount != 0,
-                      images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(
-                          image_barriers.data(), image_barriers.size()))](vk::CommandBuffer cmdbuf) {
+    // bbport: a breadcrumb naming the images transitioned (a layout change writes them).
+    Breadcrumbs::Crumb crumb{.kind = Breadcrumbs::Kind::Barrier, .name = "barriers"};
+    crumb.size = image_barriers.size();
+    crumb.count[2] = dep_info.memoryBarrierCount;
+    if (!image_barriers.empty()) {
+        crumb.count[0] = u32(image_barriers[0].oldLayout);
+        crumb.count[1] = u32(image_barriers[0].newLayout);
+    }
+    u64* const slots[4] = {&crumb.dst, &crumb.src, &crumb.hash[0], &crumb.hash[1]};
+    for (size_t i = 0; i < std::min<size_t>(image_barriers.size(), 4); ++i) {
+        *slots[i] = Breadcrumbs::HandleId(image_barriers[i].image);
+    }
+    scheduler.RecordCrumb(crumb, [memory = memory_barrier,
+                                  has_memory = dep_info.memoryBarrierCount != 0,
+                                  images = scheduler.RecordData(std::span<const vk::ImageMemoryBarrier2>(
+                                      image_barriers.data(), image_barriers.size()))](vk::CommandBuffer cmdbuf) {
         const vk::DependencyInfo info = {
             .memoryBarrierCount = has_memory ? 1U : 0U,
             .pMemoryBarriers = has_memory ? &memory : nullptr,

@@ -24,6 +24,9 @@ enum class Kind : u8 {
     Dispatch,
     DispatchIndirect,
     Transfer,
+    /// A pipeline barrier: size = image transitions, dst/src/hash[0]/hash[1] = the first four
+    /// images, count = first image's old and new layout, 1 with a memory barrier.
+    Barrier,
 };
 
 struct Crumb {
@@ -50,6 +53,8 @@ template <typename Handle>
 /// used it is named, and so is a fault address inside a freed buffer.
 void NoteDestroyed(const char* what, u64 handle, u64 gpu_address, u64 size, u32 width = 0,
                    u32 height = 0, u32 format = 0);
+/// A live image, so the report can describe the images of a barrier.
+void NoteImageCreated(u64 handle, u32 width, u32 height, u32 format, u64 size);
 
 /// A stream for a new scheduler (`name` a string literal); the first call creates the buffer.
 u32 NewStream(const Instance& instance, const char* name);

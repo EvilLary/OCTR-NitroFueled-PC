@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_breadcrumbs.h"
@@ -51,6 +52,13 @@ constexpr u32 DestroyedSize = 4096;
 std::mutex destroyed_mutex;
 std::array<Destroyed, DestroyedSize> destroyed{};
 u64 destroyed_count = 0;
+
+/// Live images by handle (under destroyed_mutex).
+struct LiveImage {
+    u32 width, height, format;
+    u64 size;
+};
+std::unordered_map<u64, LiveImage> live_images;
 
 /// The latest destruction of `handle`, if it is still kept.
 const Destroyed* FindDestroyed(u64 handle) {
@@ -232,6 +240,8 @@ const char* KindName(Kind kind) {
         return "indirect dispatch";
     case Kind::Transfer:
         return "transfer";
+    case Kind::Barrier:
+        return "barrier";
     }
     return "?";
 }
@@ -319,8 +329,34 @@ void PrintEntry(const Stream& stream, u64 id, const char* label) {
             std::printf(", src %#llx", (unsigned long long)c.src);
         }
         break;
+    case Kind::Barrier: {
+        std::printf(", %llu image transitions%s", (unsigned long long)c.size,
+                    c.count[2] ? " and a memory barrier" : "");
+        if (c.size) {
+            std::printf(", first layout %u -> %u, images", c.count[0], c.count[1]);
+            const u64 images[4] = {c.dst, c.src, c.hash[0], c.hash[1]};
+            std::scoped_lock lock{destroyed_mutex};
+            for (u64 image : images) {
+                if (!image) {
+                    continue;
+                }
+                std::printf(" %#llx", (unsigned long long)image);
+                if (const auto it = live_images.find(image); it != live_images.end()) {
+                    std::printf(" (%ux%u format %u, %llu bytes)", it->second.width,
+                                it->second.height, it->second.format,
+                                (unsigned long long)it->second.size);
+                } else {
+                    std::printf(" (not a live image)");
+                }
+            }
+            if (c.size > 4) {
+                std::printf(" ...");
+            }
+        }
+        break;
     }
-    for (u32 i = 0; i < 2; ++i) {
+    }
+    for (u32 i = 0; i < 2 && c.kind != Kind::Barrier; ++i) {
         if (c.program[i]) {
             std::printf(", code %#llx", (unsigned long long)c.program[i]);
         }
@@ -330,6 +366,12 @@ void PrintEntry(const Stream& stream, u64 id, const char* label) {
     if (c.kind == Kind::Transfer) {
         PrintIfDestroyed("destination", c.dst, entry.time, now);
         PrintIfDestroyed("source", c.src, entry.time, now);
+    }
+    if (c.kind == Kind::Barrier) {
+        const u64 images[4] = {c.dst, c.src, c.hash[0], c.hash[1]};
+        for (u64 image : images) {
+            PrintIfDestroyed("image", image, entry.time, now);
+        }
     }
 }
 
@@ -420,6 +462,15 @@ void NoteDestroyed(const char* what, u64 handle, u64 gpu_address, u64 size, u32 
     std::scoped_lock lock{destroyed_mutex};
     destroyed[destroyed_count++ % DestroyedSize] = {what,  handle, gpu_address, size,
                                                     time,  width,  height,      format};
+    live_images.erase(handle);
+}
+
+void NoteImageCreated(u64 handle, u32 width, u32 height, u32 format, u64 size) {
+    if (!handle) {
+        return;
+    }
+    std::scoped_lock lock{destroyed_mutex};
+    live_images[handle] = {width, height, format, size};
 }
 
 u32 ArgsSlot() {
