@@ -154,6 +154,20 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget, &unsafe_image,
                                 &allocation, &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // SacredFire: VRAM itself is full (a 4 GB card, or other programs): system memory
+            // where the driver allows it for this image, slow but not the game stopping.
+            static std::atomic_flag noted_host = ATOMIC_FLAG_INIT;
+            if (!noted_host.test_and_set()) {
+                std::fprintf(stderr, "VRAM: full, image of %ux%u put in system memory\n",
+                             image_ci.extent.width, image_ci.extent.height);
+            }
+            VmaAllocationCreateInfo host = over_budget;
+            host.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            host.flags &= ~VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+            result = vmaCreateImage(allocator, &image_ci_unsafe, &host, &unsafe_image,
+                                    &allocation, &alloc_info);
+        }
     }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
