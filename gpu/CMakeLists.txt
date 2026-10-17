@@ -226,6 +226,13 @@ endif()
 # SacredFire: the game executable is sacredfire.exe (out/sacredfire on Linux).
 if (WIN32)
     enable_language(RC)
+    # The resource scripts embed these files; CMake does not scan .rc includes, so without this
+    # a changed icon or manifest kept the old one in the executables.
+    set(BB_WIN_RES ${CMAKE_CURRENT_SOURCE_DIR}/../packaging/windows)
+    set_source_files_properties(${BB_WIN_RES}/sacredfire.rc PROPERTIES
+        OBJECT_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;${BB_WIN_RES}/sacredfire.manifest")
+    set_source_files_properties(${BB_WIN_RES}/launcher.rc PROPERTIES
+        OBJECT_DEPENDS "${BB_WIN_RES}/icons/ctr.ico;${BB_WIN_RES}/launcher.manifest")
     file(GLOB BB_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
     file(GLOB BB_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
     add_library(atrac9 STATIC ${BB_ATRAC9})

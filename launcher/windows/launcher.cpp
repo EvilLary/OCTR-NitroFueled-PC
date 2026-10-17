@@ -1088,6 +1088,60 @@ bool PartyInfo(const std::string& server, const std::string& nick, int& players,
     return true;
 }
 
+/// The NAT type test (nat_check.h), on a worker thread: once per server while the launcher is
+/// open (the Play page's status line starts it), again with the Online tab's button.
+struct NatState {
+    std::mutex mutex;
+    bool running = false, done = false;
+    std::string server;  // what the last test asked
+    NatCheck::Result result;
+};
+NatState g_nat;
+
+void StartNatCheck(const std::string& server) {
+    {
+        std::scoped_lock lock{g_nat.mutex};
+        if (g_nat.running) return;
+        g_nat.running = true;
+        g_nat.server = server;
+    }
+    std::thread([server] {
+        const NatCheck::Result r = NatCheck::Check(server);
+        std::scoped_lock lock{g_nat.mutex};
+        g_nat.result = r;
+        g_nat.running = false;
+        g_nat.done = true;
+    }).detach();
+}
+
+/// Short label and colour for the Play page ("NAT: type 2 (moderate)"); starts the first test
+/// for this server.
+std::string NatLabel(const std::string& server, ImVec4& color) {
+    bool running, done;
+    std::string checked;
+    NatCheck::Result r;
+    {
+        std::scoped_lock lock{g_nat.mutex};
+        running = g_nat.running;
+        done = g_nat.done;
+        checked = g_nat.server;
+        r = g_nat.result;
+    }
+    if (!running && (!done || checked != server)) {
+        StartNatCheck(server);
+        running = true;
+    }
+    color = kGrey;
+    if (running) return std::string("NAT: ") + T("comprobando...", "checking...");
+    switch (r.type) {
+    case NatCheck::Type::Open: color = kGreen; return T("NAT: tipo 1 (abierto)", "NAT: type 1 (open)");
+    case NatCheck::Type::Moderate: color = kGreen; return T("NAT: tipo 2 (moderado)", "NAT: type 2 (moderate)");
+    case NatCheck::Type::Strict: color = kYellow; return T("NAT: tipo 3 (estricto)", "NAT: type 3 (strict)");
+    case NatCheck::Type::Unknown: break;
+    }
+    return T("NAT: desconocido", "NAT: unknown");
+}
+
 /// A server setting that can travel inside a Discord join secret (and be trusted coming out
 /// of one): a host name or IP with an optional port.
 bool ValidServer(const std::string& s) {
@@ -2211,6 +2265,19 @@ void PlayTab() {
                                        T("Servidor", "Server"), srv.c_str(),
                                        T("Apodo", "Nick"), nick.c_str());
                 }
+                {
+                    ImVec4 nat_color;
+                    const std::string nat = NatLabel(Trim(srv), nat_color);
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.0f, 1.0f), "  |  ");
+                    ImGui::SameLine(0.0f, 0.0f);
+                    ImGui::TextColored(nat_color, "%s", nat.c_str());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", T("Si otros jugadores pueden conectarse directamente contigo. Más detalles en la "
+                                                  "pestaña Online. Tu IP no se muestra.",
+                                                  "Whether other players can connect to you directly. Details in the Online "
+                                                  "tab. Your IP is not shown."));
+                }
                 if (const char* problem = NickProblem(CurrentNick()))
                     ImGui::TextColored(kYellow, "%s %s", problem, T("Se te pedirá al pulsar Jugar.", "You will be asked when you press Play."));
             } else {
@@ -2928,14 +2995,6 @@ void DiscordAccountSection() {
     DiscordLinkStatusLines();
 }
 
-/// The NAT type test (nat_check.h), run on demand on a worker thread.
-struct NatState {
-    std::mutex mutex;
-    bool running = false, done = false;
-    NatCheck::Result result;
-};
-NatState g_nat;
-
 void NatTypeSection(const std::string& server) {
     bool running, done;
     NatCheck::Result result;
@@ -2946,19 +3005,7 @@ void NatTypeSection(const std::string& server) {
         result = g_nat.result;
     }
     ImGui::BeginDisabled(running);
-    if (ImGui::Button(T("Comprobar tipo de NAT", "Check NAT type"))) {
-        {
-            std::scoped_lock lock{g_nat.mutex};
-            g_nat.running = true;
-        }
-        std::thread([server] {
-            const NatCheck::Result r = NatCheck::Check(server);
-            std::scoped_lock lock{g_nat.mutex};
-            g_nat.result = r;
-            g_nat.running = false;
-            g_nat.done = true;
-        }).detach();
-    }
+    if (ImGui::Button(T("Comprobar tipo de NAT", "Check NAT type"))) StartNatCheck(server);
     ImGui::EndDisabled();
     HelpMarker(T("Comprueba si otros jugadores pueden conectarse directamente a tu PC. Pregunta a tu servidor RyuNET "
                  "y a un servidor STUN público (Cloudflare) con qué dirección te ven y las compara aquí: tu IP no se "
