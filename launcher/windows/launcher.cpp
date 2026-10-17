@@ -1049,7 +1049,9 @@ bool NickTaken() {
 }
 
 /// The lobby this player hosts (their party or private room), from the server's
-/// /ryunet/party, refreshed in the background every 20 s while it is asked for.
+/// /ryunet/party, refreshed in the background every 5 s while it is asked for: Discord's
+/// "1 of 8" follows players joining and leaving. Only changes reach Discord (DiscordPresence
+/// sends nothing for an unchanged activity), within its 5 updates per 20 s.
 struct PartyPoll {
     std::mutex mutex;
     std::string id;  // "server|nick" of the last answer
@@ -1064,7 +1066,7 @@ PartyPoll g_party;
 bool PartyInfo(const std::string& server, const std::string& nick, int& players, int& max) {
     const std::string id = server + "|" + nick;
     std::scoped_lock lock{g_party.mutex};
-    if ((g_party.id != id || GetTickCount64() - g_party.at >= 20000) && !g_party.in_flight) {
+    if ((g_party.id != id || GetTickCount64() - g_party.at >= 5000) && !g_party.in_flight) {
         g_party.in_flight = true;
         std::thread([server, nick, id] {
             const std::string body = HttpGet(server, L"/ryunet/party?name=" + Widen(nick));
@@ -4254,6 +4256,38 @@ struct SteamShortcut {
     return out;
 }
 
+/// The launcher's name: the packaged executable, the desktop shortcut, Steam's entry and the
+/// window all use it. Releases before v0.5.1 shipped CTR-NitroFueled-PC.exe and a desktop
+/// shortcut named "CTR Nitro-Fueled".
+constexpr const wchar_t* kLauncherName = L"Crash\u2122 Team Racing Nitro-Fueled";
+constexpr const wchar_t* kOldLauncherExe = L"CTR-NitroFueled-PC.exe";
+constexpr const wchar_t* kOldShortcut = L"CTR Nitro-Fueled.lnk";
+
+/// Where a .lnk points (empty when it cannot be read).
+fs::path ShortcutTarget(const fs::path& link) {
+    fs::path target;
+    IShellLinkW* psl = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&psl)))
+        return target;
+    IPersistFile* ppf = nullptr;
+    if (SUCCEEDED(psl->QueryInterface(IID_IPersistFile, (void**)&ppf))) {
+        wchar_t path[MAX_PATH] = {};
+        if (SUCCEEDED(ppf->Load(link.c_str(), STGM_READ)) &&
+            SUCCEEDED(psl->GetPath(path, MAX_PATH, nullptr, SLGP_RAWPATH)))
+            target = path;
+        ppf->Release();
+    }
+    psl->Release();
+    return target;
+}
+
+/// This executable, whatever it is called.
+fs::path LauncherExe() {
+    wchar_t path[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
+    return fs::path(std::wstring(path, n));
+}
+
 bool CreateDesktopShortcut(std::string& out_error) {
     App& a = g_app;
     wchar_t desktop[MAX_PATH];
@@ -4261,13 +4295,21 @@ bool CreateDesktopShortcut(std::string& out_error) {
         out_error = T("No se pudo obtener la ruta del Escritorio.", "Could not get Desktop path.");
         return false;
     }
-    fs::path link_path = fs::path(desktop) / L"CTR Nitro-Fueled.lnk";
-    fs::path target_exe = a.root / L"CTR-NitroFueled-PC.exe";
+    const fs::path target_exe = LauncherExe();
     std::error_code ec;
-    if (!fs::is_regular_file(target_exe, ec)) {
-        wchar_t mod_path[MAX_PATH];
-        GetModuleFileNameW(nullptr, mod_path, MAX_PATH);
-        target_exe = mod_path;
+    // A shortcut of that name may already open something else (another copy of the game, an
+    // emulator): never replace it, use the "(PC)" name then.
+    const auto ours = [&](const fs::path& link) {
+        if (!fs::is_regular_file(link, ec)) return true;
+        const fs::path t = ShortcutTarget(link);
+        return t.parent_path() == a.root || t == target_exe;
+    };
+    fs::path link_path = fs::path(desktop) / (std::wstring(kLauncherName) + L".lnk");
+    if (!ours(link_path)) link_path = fs::path(desktop) / (std::wstring(kLauncherName) + L" (PC).lnk");
+    if (!ours(link_path)) {
+        out_error = T("Ya hay accesos directos con ese nombre que abren otra cosa: no se ha cambiado nada.",
+                      "Shortcuts with that name already open something else: nothing was changed.");
+        return false;
     }
 
     IShellLinkW* psl = nullptr;
@@ -4279,14 +4321,8 @@ bool CreateDesktopShortcut(std::string& out_error) {
     psl->SetPath(target_exe.c_str());
     psl->SetArguments(L"--launch");
     psl->SetWorkingDirectory(a.root.c_str());
-    psl->SetDescription(L"Crash Team Racing Nitro-Fueled PC");
-
-    fs::path icon = a.root / L"packaging" / L"windows" / L"icons" / L"ctr.ico";
-    if (fs::is_regular_file(icon, ec)) {
-        psl->SetIconLocation(icon.c_str(), 0);
-    } else {
-        psl->SetIconLocation(target_exe.c_str(), 0);
-    }
+    psl->SetDescription(kLauncherName);
+    psl->SetIconLocation(target_exe.c_str(), 0);  // the icon in the executable
 
     IPersistFile* ppf = nullptr;
     hr = psl->QueryInterface(IID_IPersistFile, (void**)&ppf);
@@ -4299,7 +4335,31 @@ bool CreateDesktopShortcut(std::string& out_error) {
         out_error = T("No se pudo guardar el acceso directo en el Escritorio.", "Could not save shortcut to Desktop.");
         return false;
     }
+    // The shortcut of releases before v0.5.1, when it opened this folder's launcher.
+    const fs::path old_link = fs::path(desktop) / kOldShortcut;
+    if (fs::is_regular_file(old_link, ec) && ShortcutTarget(old_link).parent_path() == a.root) fs::remove(old_link, ec);
     return true;
+}
+
+/// Releases before v0.5.1 called the launcher CTR-NitroFueled-PC.exe. An update unzipped over
+/// one keeps that file and its shortcuts: the old executable becomes a copy of this one, so a
+/// Steam entry or any other shortcut naming it opens this launcher, and the desktop shortcut
+/// made by the old launcher is made again with the new name.
+void MigrateOldLauncher() {
+    App& a = g_app;
+    std::error_code ec;
+    const fs::path self = LauncherExe();
+    const fs::path old_exe = a.root / kOldLauncherExe;
+    if (self.filename() == kOldLauncherExe || !fs::is_regular_file(old_exe, ec)) return;
+    if (fs::file_size(old_exe, ec) != fs::file_size(self, ec) || ReadText(old_exe) != ReadText(self))
+        fs::copy_file(self, old_exe, fs::copy_options::overwrite_existing, ec);
+    wchar_t desktop[MAX_PATH];
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, 0, desktop))) return;
+    const fs::path old_link = fs::path(desktop) / kOldShortcut;
+    if (fs::is_regular_file(old_link, ec) && ShortcutTarget(old_link).parent_path() == a.root) {
+        std::string error;
+        CreateDesktopShortcut(error);
+    }
 }
 
 [[maybe_unused]] bool AddToSteam(std::string& out_msg) {
@@ -4340,22 +4400,16 @@ bool CreateDesktopShortcut(std::string& out_error) {
     }
 
     fs::path assets_dir;
-    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid",
-                                  fs::path(L"C:\\Users\\RyuPC\\Downloads\\steamgrid")}) {
+    for (const auto& candidate : {a.root / L"steamgrid", a.root / L"packaging" / L"windows" / L"steamgrid"}) {
         if (fs::is_directory(candidate, ec)) {
             assets_dir = candidate;
             break;
         }
     }
 
-    fs::path target_exe = a.root / L"CTR-NitroFueled-PC.exe";
-    if (!fs::is_regular_file(target_exe, ec)) {
-        wchar_t mod_path[MAX_PATH];
-        GetModuleFileNameW(nullptr, mod_path, MAX_PATH);
-        target_exe = mod_path;
-    }
+    const fs::path target_exe = LauncherExe();
 
-    const std::string app_name = "Crash Team Racing Nitro-Fueled";
+    const std::string app_name = Narrow(kLauncherName);
     const std::string exe_str = "\"" + PathText(target_exe) + "\"";
     const std::string start_dir_str = "\"" + PathText(a.root) + "\"";
 
@@ -4413,7 +4467,8 @@ bool CreateDesktopShortcut(std::string& out_error) {
 
         bool found = false;
         for (auto& sc : shortcuts) {
-            if (sc.app_name == app_name || sc.exe.find("CTR-NitroFueled-PC.exe") != std::string::npos) {
+            if (sc.app_name == app_name || sc.exe.find(PathText(kOldLauncherExe)) != std::string::npos ||
+                sc.exe.find(PathText(target_exe.filename())) != std::string::npos) {
                 sc.appid = appid;
                 sc.app_name = app_name;
                 sc.exe = exe_str;
@@ -5085,6 +5140,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     LoadState();
+    MigrateOldLauncher();
 
     if (direct_launch) {
         if (g_app.worker.joinable()) g_app.worker.join();
@@ -5127,7 +5183,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const int x = work.left + std::max(0, int(work.right - work.left - width) / 2);
     const int y = work.top + std::max(0, int(work.bottom - work.top - height) / 2);
     g_ui_scale = scale;
-    HWND hwnd = CreateWindowW(wc.lpszClassName, L"Crash Team Racing: Nitro-Fueled",
+    HWND hwnd = CreateWindowW(wc.lpszClassName, kLauncherName,
                               WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU,
                               x, y, width, height, nullptr, nullptr, instance, nullptr);
     g_app.hwnd = hwnd;
@@ -5135,7 +5191,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     DwmSetWindowAttribute(hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark_titlebar, sizeof(dark_titlebar));
     if (!CreateDevice(hwnd)) {
         CleanupDevice();
-        MessageBoxW(nullptr, L"Direct3D 11 is not available.", L"CTR Nitro-Fueled PC", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Direct3D 11 is not available.", kLauncherName, MB_ICONERROR);
         return 1;
     }
     ShowWindow(hwnd, SW_SHOWDEFAULT);

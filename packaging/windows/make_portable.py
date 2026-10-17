@@ -32,6 +32,10 @@ MSYS2 = Path(os.environ.get('MSYS2_ROOT', r'C:\msys64'))
 CLANG_BIN = MSYS2 / 'clang64' / 'bin'
 NAME = 'CTR-NitroFueled-PC-portable'
 LAUNCHER = 'CTR-NitroFueled-PC.exe'
+# Its name in the package (the build keeps the ASCII name above for the toolchain). An update
+# unzipped over an older release leaves CTR-NitroFueled-PC.exe there: the new launcher turns it
+# into a copy of itself and renames the desktop shortcut (launcher.cpp, MigrateOldLauncher).
+PACKAGED_LAUNCHER = 'Crash\u2122 Team Racing Nitro-Fueled.exe'
 # The Python that runs run.py and scripts/ (python.org's "embeddable package": no installer, no
 # registry, no PATH). Pinned by version and SHA-256.
 PYTHON_VERSION = '3.14.8'
@@ -124,7 +128,7 @@ def third_party(dlls, python=None, dlss=False):
         lines += DLSS_THIRD_PARTY
     lines += ['sacredfire.exe includes AMD FidelityFX FSR 3.1 (MIT, through',
               'https://github.com/FireBurn/FSR-Vulkan).', '']
-    lines += ['The launcher (CTR-NitroFueled-PC.exe) and sacredfire.exe include Dear ImGui (MIT,',
+    lines += [f'The launcher ({PACKAGED_LAUNCHER}) and sacredfire.exe include Dear ImGui (MIT,',
               'https://github.com/ocornut/imgui) and the other libraries listed in the repository.', '']
     lines += ['art\\ctr-menu.ttf: the Lilita One font by Juan Montoreano (SIL Open Font License 1.1,',
               'art\\ctr-menu-font-license.txt). art\\ctr-hero.png and art\\ctr-logo.png: game artwork',
@@ -198,7 +202,7 @@ def main():
         shutil.copy2(a.dlss_sdk / 'LICENSE.txt', folder / 'licenses' / 'NVIDIA-DLSS-SDK-LICENSE.txt')
         write_text(folder / 'licenses' / 'dlss-bridge-LICENSE.txt',
                    (ROOT / 'dlss_bridge' / 'LICENSE.txt').read_text(encoding='utf-8'))
-    shutil.copy2(launcher, folder)
+    shutil.copy2(launcher, folder / PACKAGED_LAUNCHER)
     python = bundle_python(folder, a.dist / 'pycache')
     shutil.copy2(ROOT / 'run.py', folder)
     for script in (ROOT / 'scripts').glob('*.py'):

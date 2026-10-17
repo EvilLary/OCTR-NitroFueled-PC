@@ -23,7 +23,7 @@ Python ya viene incluido (carpeta python\): no hay que instalar nada.
 
 PUESTA EN MARCHA
 ----------------
-1. Abre CTR-NitroFueled-PC.exe (el launcher).
+1. Abre "Crash™ Team Racing Nitro-Fueled.exe" (el launcher).
 2. En "Juego base" elige tu carpeta CUSA13795 y en "Actualizacion 1.21"
    tu carpeta CUSA13795-patch. Pulsa "Preparar el juego": crea
    CUSA13795-1.21 al lado del juego base con enlaces duros (no ocupa el
