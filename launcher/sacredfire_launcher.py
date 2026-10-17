@@ -80,6 +80,15 @@ PATCHES = [
 # it needs the 60 FPS patch.
 FPS_LIMITS = [("No limit", "0"), ("30", "30"), ("60", "60"), ("72 (half of 144 Hz)", "72"),
               ("90", "90"), ("120", "120"), ("144", "144"), ("240", "240")]
+# bbport.ini render_res: the size the game draws its 3D scene at (scripts/patches.py render_plan;
+# run.sh turns the PS4 Pro path on above 1080p). "" keeps the older PS4 Pro switches below.
+RENDER_RESOLUTIONS = [("Game default (the PS4 Pro switches decide)", ""),
+                      ("480p (854 x 480, very low-end PCs)", "480"),
+                      ("720p (1280 x 720, low-end PCs, Steam Deck)", "720"),
+                      ("1080p (1920 x 1080)", "1080"),
+                      ("1440p (2560 x 1440, PS4 Pro)", "1440"),
+                      ("1620p (2880 x 1620)", "1620"),
+                      ("4K (3840 x 2160)", "2160")]
 
 DEFAULTS = {
     "ui_language": "",
@@ -493,12 +502,22 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.fullscreen_row)
         self.present_row = combo_row(tr("Presentation"), None, PRESENT_MODES, self.settings["present_mode"])
         screen.add(self.present_row)
+        self.render_res_row = combo_row(tr("Internal resolution"), tr("Also in the in-game menu"),
+                                        RENDER_RESOLUTIONS, self.ini.get("render_res", ""))
+        self.render_res_row.set_tooltip_text(
+            tr("The size the game draws its 3D scene at. Above 1080p it uses the game's PS4 Pro path and outputs 4K, "
+               "which removes jagged edges even on a 1080p screen; 4K needs a strong GPU. 720p and 480p help weaker "
+               "PCs and the Steam Deck."))
+        self.render_res_row.connect("notify::selected", lambda *_: self.update_render_res())
+        screen.add(self.render_res_row)
         self.fps_row = Adw.SwitchRow(title=tr("FPS counter in the corner"), active=self.ini.get("show_fps") == "1")
         screen.add(self.fps_row)
         self.fps_limit_row = combo_row(tr("FPS limit"), tr("Above 30 it needs the 60 FPS unlock patch; also in the in-game menu"),
                                        FPS_LIMITS, self.ini.get("fps_limit", "60"))
         screen.add(self.fps_limit_row)
         page.add(screen)
+
+        self.update_render_res()
 
         dev = Adw.PreferencesGroup(title=tr("Developer"))
         self.mangohud_row = Adw.SwitchRow(title="MangoHud", active=self.settings["mangohud"])
@@ -532,6 +551,16 @@ class LauncherWindow(Adw.ApplicationWindow):
         page.add(steam)
         self.update_user_status()
         return page
+
+    def update_render_res(self):
+        """A chosen internal resolution decides the PS4 Pro path and the 1080p Pro patch."""
+        chosen = bool(combo_value(self.render_res_row))
+        self.neo_row.set_sensitive(not chosen)
+        self.neo_row.set_subtitle(tr("Set by the internal resolution (Display)") if chosen else
+                                  tr("Neo mode, 7 CPUs, 5568 MiB direct memory: the game's Pro rendering path"))
+        pro_patch = self.patch_rows.get("patch_pro_1080p")
+        if pro_patch:
+            pro_patch.set_sensitive(not chosen)
 
     def game_dir(self):
         return Path(self.settings["game_dir"]).expanduser()
@@ -622,6 +651,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.ini[key] = "1" if row.get_active() else "0"
         self.ini["show_fps"] = "1" if self.fps_row.get_active() else "0"
         self.ini["fps_limit"] = combo_value(self.fps_limit_row)
+        self.ini["render_res"] = combo_value(self.render_res_row) or None  # "": the Pro switches decide
         self.ini["online"] = "1" if self.online_row.get_active() else "0"
         self.ini["online_name"] = self.nick_row.get_text().strip()
         self.ini["online_server"] = self.server_row.get_text().strip() or ONLINE_SERVER
@@ -640,6 +670,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         limit = self.ini.get("fps_limit", "60")
         values = self.fps_limit_row.values
         self.fps_limit_row.set_selected(values.index(limit) if limit in values else values.index("60"))
+        res = self.ini.get("render_res", "")
+        self.render_res_row.set_selected(self.render_res_row.values.index(res) if res in self.render_res_row.values else 0)
+        self.update_render_res()
 
     def environment(self):
         return game_environment(self.settings)
