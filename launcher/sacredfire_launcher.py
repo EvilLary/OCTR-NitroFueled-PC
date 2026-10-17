@@ -289,12 +289,64 @@ def flat_button(icon, tooltip, handler):
     return button
 
 
+# What the AppImage's wrapper and runtime add to the environment (packaging/default.nix): the
+# bundled GTK's data, libraries, fonts and pixbuf loaders. A browser or file manager started with
+# them finds the wrong libraries, and the bundled GIO does not see the system's applications.
+FOREIGN_ENV = ("LD_LIBRARY_PATH", "LD_PRELOAD", "GDK_PIXBUF_MODULE_FILE", "FONTCONFIG_FILE", "GIO_EXTRA_MODULES",
+               "GI_TYPELIB_PATH", "GSETTINGS_SCHEMA_DIR", "GTK_PATH", "GTK_EXE_PREFIX", "GTK_DATA_PREFIX",
+               "PYTHONPATH", "PYTHONHOME", "PYTHONNOUSERSITE", "APPDIR", "APPIMAGE", "ARGV0", "OWD",
+               "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "VK_ADD_LAYER_PATH", "VK_LAYER_PATH", "LIBGL_DRIVERS_PATH",
+               "__EGL_VENDOR_LIBRARY_DIRS", "LIBVA_DRIVERS_PATH")
+
+
+def host_environment():
+    """The environment for a program of the player's system: without what the AppImage added, and
+    with the system's own PATH and data directories."""
+    env = {k: v for k, v in os.environ.items() if k not in FOREIGN_ENV and not k.startswith(("BB_", "NIX"))}
+    path = [p for p in env.get("PATH", "").split(":") if p and not p.startswith("/nix/")]
+    env["PATH"] = ":".join(path + [p for p in ("/usr/local/bin", "/usr/bin", "/bin") if p not in path])
+    data = [d for d in env.get("XDG_DATA_DIRS", "").split(":") if d and not d.startswith("/nix/")]
+    home = Path.home()
+    for d in (str(home / ".local/share/flatpak/exports/share"), "/var/lib/flatpak/exports/share",
+              "/usr/local/share", "/usr/share"):
+        if d not in data:
+            data.append(d)
+    env["XDG_DATA_DIRS"] = ":".join(data)
+    if env.get("LC_ALL") == "C.UTF-8":
+        del env["LC_ALL"]  # the wrapper's default, not the player's
+    return env
+
+
+def open_external(target):
+    """Opens a web address or a folder with the player's own browser or file manager: the system's
+    xdg-open (or gio, kde-open) with host_environment(); GIO as a last resort. True when one of
+    them started (whether the page opened is up to the desktop)."""
+    env = host_environment()
+    for command in (["xdg-open"], ["gio", "open"], ["kde-open"], ["exo-open"]):
+        for folder in env["PATH"].split(":"):
+            exe = Path(folder) / command[0]
+            if not exe.is_file() or str(exe).startswith("/nix/"):
+                continue
+            try:
+                subprocess.Popen([str(exe), *command[1:], str(target)], env=env, start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return True
+            except OSError:
+                break
+    try:
+        uri = target if "://" in str(target) else Gio.File.new_for_path(str(target)).get_uri()
+        return Gio.AppInfo.launch_default_for_uri(uri, None)
+    except GLib.Error:
+        return False
+
+
 def open_folder(window, path):
     try:
         Path(path).mkdir(parents=True, exist_ok=True)
     except OSError:
         return
-    Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).launch(window, None, None)
+    if not open_external(path):
+        Gtk.FileLauncher.new(Gio.File.new_for_path(str(path))).launch(window, None, None)
 
 
 def combo_row(title, subtitle, choices, current):
@@ -1027,7 +1079,16 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.show_nick_status()
 
         def open_url(url):
-            GLib.idle_add(lambda: Gio.AppInfo.launch_default_for_uri(url, None) and False)
+            def show():
+                opened = open_external(url)
+                # Whether or not a browser came up: the link can also be pasted by hand.
+                toast = Adw.Toast(title=tr("Discord's authorization page opened in your browser") if opened
+                                  else tr("Could not open your browser: copy the link and open it there"),
+                                  button_label=tr("Copy link"), timeout=0 if not opened else 30)
+                toast.connect("button-clicked", lambda _t: self.get_clipboard().set(url))
+                self.toasts.add_toast(toast)
+                return False
+            GLib.idle_add(show)
 
         def work():
             auth = discord_oauth.authorize(app_id, open_url)
@@ -1268,7 +1329,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         return buffer.get_text(*buffer.get_bounds(), False)
 
     def on_open_issue(self, _button):
-        Gio.AppInfo.launch_default_for_uri(ISSUE2_URL, None)
+        open_external(ISSUE2_URL)
 
     def note_issue_line(self, line):
         """A line of the game's log: the notice appears at the first mention of the bug."""
