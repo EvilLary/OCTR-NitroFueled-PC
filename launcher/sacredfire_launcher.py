@@ -360,6 +360,9 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.nick_asked = ""   # "server|nick" of that answer
         self.nick_timer = 0
         self.discord_busy = False
+        # A Steam shortcut points at <data dir>/SacredFire.AppImage: opening a newer release's
+        # AppImage once moves the link to it, so the shortcut keeps working after an update.
+        steam_shortcuts.stable_appimage_link()
         self.build()
         self.connect("close-request", self.on_close)
         GLib.timeout_add_seconds(1, self.tick)
