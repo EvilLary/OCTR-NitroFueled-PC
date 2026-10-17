@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
+#include <atomic>
+#include <cstdio>
 #include <ranges>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -131,6 +133,20 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
                                      &allocation, &alloc_info);
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        // bbport: over the process's VRAM budget (other programs hold VRAM too, or the texture
+        // collector has not caught up): allocate anyway and let the driver page or fall back to
+        // system memory, slower for a while instead of the game stopping (code 23).
+        static std::atomic_flag noted = ATOMIC_FLAG_INIT;
+        if (!noted.test_and_set()) {
+            std::fprintf(stderr, "VRAM: over the budget, image of %ux%u allocated anyway\n",
+                         image_ci.extent.width, image_ci.extent.height);
+        }
+        VmaAllocationCreateInfo over_budget = alloc_ci;
+        over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget, &unsafe_image,
+                                &allocation, &alloc_info);
+    }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
