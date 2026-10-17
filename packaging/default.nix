@@ -132,6 +132,14 @@ pkgs.stdenv.mkDerivation {
     # Their debug info names the build environment's headers (the full GCC, Vulkan headers): Nix
     # took those for dependencies, ~300 MB. Symbols stay (crash reports).
     ${pkgs.binutils-unwrapped}/bin/strip --strip-debug $d/bin/sacredfire $d/bin/bb-gpu-capabilities
+    # Menu entry and icon: nix-appimage takes the .desktop whose Exec is the main program and its
+    # 256x256 icon as the AppImage's own (.DirIcon), which AppImage managers (Gear Lever,
+    # AppImageLauncher) need to integrate it.
+    install -Dm644 launcher/io.github.sacredfire.Launcher.png \
+      $out/share/icons/hicolor/256x256/apps/io.github.sacredfire.Launcher.png
+    mkdir -p $out/share/applications
+    sed -e 's|@LAUNCHER@|sacredfire|' -e 's|@ICON@|io.github.sacredfire.Launcher|' \
+      launcher/io.github.sacredfire.Launcher.desktop.in > $out/share/applications/io.github.sacredfire.Launcher.desktop
     runHook postInstall
   '';
   postFixup = ''

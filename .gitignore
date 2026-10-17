@@ -8,6 +8,7 @@ pgo/
 !/art/ctr-hero.png
 !/art/ctr-logo.png
 !/art/ctr-menu-background.png
+!/launcher/io.github.sacredfire.Launcher.png
 last_run.log
 dist/
 packaging/runtime-paths.nix
