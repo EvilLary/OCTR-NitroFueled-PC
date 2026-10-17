@@ -243,14 +243,30 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         .pStencilAttachment = db.has_stencil ? &stencil_attachment : nullptr,
     };
 
+    // bbport: a breadcrumb for the start of the pass (its loads and clears write the targets).
+    const Breadcrumbs::Crumb crumb{
+        .kind = Breadcrumbs::Kind::Transfer,
+        .name = "render pass start",
+        .count = {render_state.width, render_state.height, 0},
+        .dst = render_state.num_color_attachments
+                   ? Breadcrumbs::HandleId(render_state.color_attachments[0].image_view)
+                   : Breadcrumbs::HandleId(db.image_view),
+    };
     if (workers.empty()) {
+        const u32 id = Breadcrumbs::Enabled() ? Breadcrumbs::Note(crumb_stream, crumb) : 0;
+        if (id) {
+            Breadcrumbs::Mark(current_cmdbuf, crumb_stream, id, false);
+        }
         current_cmdbuf.beginRendering(rendering_info);
+        if (id) {
+            Breadcrumbs::Mark(current_cmdbuf, crumb_stream, id, true);
+        }
         CarryResume(true);
         return;
     }
     // The attachment infos live on this stack frame: the recorded closure keeps copies.
-    Record([info = rendering_info, color_attachments, depth_attachment,
-            stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
+    RecordCrumb(crumb, [info = rendering_info, color_attachments, depth_attachment,
+                        stencil_attachment](vk::CommandBuffer cmdbuf) mutable {
         info.pColorAttachments = color_attachments.data();
         if (info.pDepthAttachment) {
             info.pDepthAttachment = &depth_attachment;

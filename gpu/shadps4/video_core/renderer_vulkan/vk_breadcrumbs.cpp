@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -30,8 +31,45 @@ constexpr u64 ArgsOffset = MaxStreams * StreamStride; // where they start in the
 
 struct Entry {
     u64 id;
+    u64 time; ///< steady clock, ns: when it was recorded
     Crumb crumb;
 };
+
+u64 Now() {
+    return u64(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+                   .count());
+}
+
+/// Images and buffers destroyed lately (NoteDestroyed), oldest overwritten first.
+struct Destroyed {
+    const char* what;
+    u64 handle, gpu_address, size, time;
+    u32 width, height, format;
+};
+constexpr u32 DestroyedSize = 4096;
+std::mutex destroyed_mutex;
+std::array<Destroyed, DestroyedSize> destroyed{};
+u64 destroyed_count = 0;
+
+/// The latest destruction of `handle`, if it is still kept.
+const Destroyed* FindDestroyed(u64 handle) {
+    if (!handle) {
+        return nullptr;
+    }
+    const u64 kept = std::min<u64>(destroyed_count, DestroyedSize);
+    for (u64 i = 0; i < kept; ++i) {
+        const Destroyed& d = destroyed[(destroyed_count - 1 - i) % DestroyedSize];
+        if (d.handle == handle) {
+            return &d;
+        }
+    }
+    return nullptr;
+}
+
+double Ms(u64 from, u64 to) {
+    return double(s64(to - from)) / 1e6;
+}
 
 struct Stream {
     const char* name = nullptr;
@@ -90,6 +128,7 @@ void ReportFault() {
                                         "instruction pointer unknown",
                                         "instruction pointer invalid",
                                         "instruction pointer fault"};
+    const u64 now = Now();
     for (u32 i = 0; i < counts.addressInfoCount; ++i) {
         const VkDeviceFaultAddressInfoEXT& a = addresses[i];
         const u64 precision = a.addressPrecision ? a.addressPrecision : 1;
@@ -98,6 +137,21 @@ void ReportFault() {
                     u32(a.addressType) < std::size(kinds) ? kinds[a.addressType] : "unknown",
                     (unsigned long long)a.reportedAddress, (unsigned long long)low,
                     (unsigned long long)(low + precision - 1));
+        // A buffer freed lately that held that address: the GPU still used it.
+        std::scoped_lock lock{destroyed_mutex};
+        const u64 kept = std::min<u64>(destroyed_count, DestroyedSize);
+        for (u64 k = 0; k < kept; ++k) {
+            const Destroyed& d = destroyed[(destroyed_count - 1 - k) % DestroyedSize];
+            if (d.gpu_address && low < d.gpu_address + std::max<u64>(d.size, 1) &&
+                d.gpu_address <= low + precision - 1) {
+                std::printf("    inside %s %#llx (GPU %#llx, %llu bytes) destroyed %.1f ms "
+                            "before this report\n",
+                            d.what, (unsigned long long)d.handle,
+                            (unsigned long long)d.gpu_address, (unsigned long long)d.size,
+                            Ms(d.time, now));
+                break;
+            }
+        }
     }
     for (u32 i = 0; i < counts.vendorInfoCount; ++i) {
         std::printf("  vendor: %s (code %#llx, data %#llx)\n", vendor[i].description,
@@ -176,8 +230,25 @@ const char* KindName(Kind kind) {
         return "dispatch";
     case Kind::DispatchIndirect:
         return "indirect dispatch";
+    case Kind::Transfer:
+        return "transfer";
     }
     return "?";
+}
+
+/// A transfer's image or buffer that was destroyed after the transfer was recorded.
+void PrintIfDestroyed(const char* role, u64 handle, u64 recorded, u64 now) {
+    std::scoped_lock lock{destroyed_mutex};
+    const Destroyed* d = FindDestroyed(handle);
+    if (!d || s64(d->time - recorded) < 0) {
+        return;
+    }
+    std::printf("      its %s (%s %#llx", role, d->what, (unsigned long long)handle);
+    if (d->width) {
+        std::printf(", %ux%u format %u", d->width, d->height, d->format);
+    }
+    std::printf(") was DESTROYED %.1f ms after this was recorded, %.1f ms before this report\n",
+                Ms(recorded, d->time), Ms(d->time, now));
 }
 
 void PrintEntry(const Stream& stream, u64 id, const char* label) {
@@ -226,13 +297,40 @@ void PrintEntry(const Stream& stream, u64 id, const char* label) {
         }
         break;
     }
+    case Kind::Transfer:
+        std::printf(" %s", c.name ? c.name : "?");
+        if (c.count[0]) {
+            std::printf(", image %ux%u", c.count[0], c.count[1]);
+            if (c.count[2]) {
+                std::printf(" format %u", c.count[2]);
+            }
+        }
+        if (c.address) {
+            std::printf(", guest %#llx", (unsigned long long)c.address);
+        }
+        if (c.size) {
+            std::printf(", %llu bytes", (unsigned long long)c.size);
+        }
+        std::printf(", dst %#llx", (unsigned long long)c.dst);
+        if (c.dst_gpu) {
+            std::printf(" (GPU %#llx)", (unsigned long long)c.dst_gpu);
+        }
+        if (c.src) {
+            std::printf(", src %#llx", (unsigned long long)c.src);
+        }
+        break;
     }
     for (u32 i = 0; i < 2; ++i) {
         if (c.program[i]) {
             std::printf(", code %#llx", (unsigned long long)c.program[i]);
         }
     }
-    std::printf("\n");
+    const u64 now = Now();
+    std::printf(" [recorded %.1f ms before this report]\n", Ms(entry.time, now));
+    if (c.kind == Kind::Transfer) {
+        PrintIfDestroyed("destination", c.dst, entry.time, now);
+        PrintIfDestroyed("source", c.src, entry.time, now);
+    }
 }
 
 /// The guest code of the shaders of the stuck command, for disassembly (up to 64 KiB each:
@@ -297,6 +395,7 @@ u32 Note(u32 stream_index, const Crumb& crumb) {
     const u64 id = stream.next.fetch_add(1, std::memory_order_relaxed);
     Entry& entry = stream.ring[id & (RingSize - 1)];
     entry.crumb = crumb;
+    entry.time = Now();
     entry.id = id;
     if (crumb.args_slot < ArgSlots) {
         args_notes[crumb.args_slot] = {id, stream_index, crumb.hash[0]};
@@ -310,6 +409,17 @@ void Mark(vk::CommandBuffer cmdbuf, u32 stream, u32 id, bool after) {
     }
     cmdbuf.writeBufferMarkerAMD(vk::PipelineStageFlagBits::eBottomOfPipe, marker_buffer,
                                 stream * StreamStride, id * 2 + (after ? 1 : 0));
+}
+
+void NoteDestroyed(const char* what, u64 handle, u64 gpu_address, u64 size, u32 width,
+                   u32 height, u32 format) {
+    if (!handle) {
+        return;
+    }
+    const u64 time = Now();
+    std::scoped_lock lock{destroyed_mutex};
+    destroyed[destroyed_count++ % DestroyedSize] = {what,  handle, gpu_address, size,
+                                                    time,  width,  height,      format};
 }
 
 u32 ArgsSlot() {
@@ -373,13 +483,20 @@ void Report(const char* title, const char* where) {
                 continue;
             }
             std::printf(", the GPU finished #%llu but did not start #%llu: stuck in the work "
-                        "recorded between them (copies, clears, barriers) or before it\n",
+                        "recorded between them (barriers, the start of a render pass) or before "
+                        "it\n",
                         (unsigned long long)id, (unsigned long long)(id + 1));
+            for (u64 earlier = id > 4 ? id - 4 : 1; earlier < id; ++earlier) {
+                PrintEntry(stream, earlier, "earlier");
+            }
             PrintEntry(stream, id, "finished");
             PrintEntry(stream, id + 1, "next");
         } else {
             std::printf(", the GPU started #%llu and did not finish it (%llu noted after it)\n",
                         (unsigned long long)id, (unsigned long long)(last - id));
+            for (u64 earlier = id > 4 ? id - 4 : 1; earlier + 1 < id; ++earlier) {
+                PrintEntry(stream, earlier, "earlier");
+            }
             if (id > 1) {
                 PrintEntry(stream, id - 1, "finished");
             }
@@ -390,6 +507,26 @@ void Report(const char* title, const char* where) {
         for (u64 next = id + 2; next <= std::min(last, id + 4); ++next) {
             PrintEntry(stream, next, "later");
         }
+    }
+    // The last images and buffers destroyed: one the GPU still used shows up here.
+    const u64 now = Now();
+    std::scoped_lock lock{destroyed_mutex};
+    const u64 kept = std::min<u64>(destroyed_count, 8);
+    std::printf("  destroyed lately (%llu images and buffers in all):\n",
+                (unsigned long long)destroyed_count);
+    for (u64 i = 0; i < kept; ++i) {
+        const Destroyed& d = destroyed[(destroyed_count - 1 - i) % DestroyedSize];
+        std::printf("    %s %#llx", d.what, (unsigned long long)d.handle);
+        if (d.width) {
+            std::printf(" %ux%u format %u", d.width, d.height, d.format);
+        }
+        if (d.gpu_address) {
+            std::printf(" GPU %#llx", (unsigned long long)d.gpu_address);
+        }
+        if (d.size) {
+            std::printf(" %llu bytes", (unsigned long long)d.size);
+        }
+        std::printf(", %.1f ms before this report\n", Ms(d.time, now));
     }
     std::fflush(stdout);
 }

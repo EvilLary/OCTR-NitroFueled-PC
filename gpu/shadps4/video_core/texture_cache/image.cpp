@@ -86,9 +86,16 @@ static vk::FormatFeatureFlags2 FormatFeatureFlags(const vk::ImageUsageFlags usag
     return feature_flags;
 }
 
+/// bbport: noted for the GPU breadcrumbs (a device loss names a destroyed image still in use).
+static void NoteImageDestroyed(vk::Image image, const vk::ImageCreateInfo& ci, u64 size_bytes) {
+    Vulkan::Breadcrumbs::NoteDestroyed("image", Vulkan::Breadcrumbs::HandleId(image), 0, size_bytes,
+                                       ci.extent.width, ci.extent.height, u32(ci.format));
+}
+
 UniqueImage::~UniqueImage() {
     if (image) {
         BbStats::vk_image_bytes.fetch_sub(size_bytes, std::memory_order_relaxed);
+        NoteImageDestroyed(image, image_ci, size_bytes);
         vmaDestroyImage(allocator, image, allocation);
     }
 }
@@ -96,6 +103,7 @@ UniqueImage::~UniqueImage() {
 void UniqueImage::Destroy() {
     if (image) {
         BbStats::vk_image_bytes.fetch_sub(size_bytes, std::memory_order_relaxed);
+        NoteImageDestroyed(image, image_ci, size_bytes);
         vmaDestroyImage(allocator, image, allocation);
         image = vk::Image{};
         allocation = {};

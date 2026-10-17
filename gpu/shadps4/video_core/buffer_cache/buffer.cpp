@@ -73,6 +73,18 @@ UniqueBuffer::~UniqueBuffer() {
 }
 
 void UniqueBuffer::Destroy() {
+    // bbport: noted for the GPU breadcrumbs (a device loss names a destroyed buffer still in use,
+    // or one that held the faulting address).
+    if (buffer) {
+        u64 size = 0;
+        if (allocation) {
+            VmaAllocationInfo info{};
+            vmaGetAllocationInfo(allocator, allocation, &info);
+            size = info.size;
+        }
+        Vulkan::Breadcrumbs::NoteDestroyed("buffer", Vulkan::Breadcrumbs::HandleId(buffer),
+                                           bda_addr, size);
+    }
     if (allocation) {
         vmaDestroyBuffer(allocator, buffer, allocation);
     } else if (buffer) {
