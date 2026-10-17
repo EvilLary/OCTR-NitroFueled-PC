@@ -130,8 +130,10 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  # A draft release with the two packages only: the maintainer writes the notes, tries the
+  # packages and publishes it. The checksum and build files stay in the workflow's artifacts.
   release:
-    name: Publish GitHub Release
+    name: Draft GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [linux, windows]
     runs-on: ubuntu-24.04
@@ -148,13 +150,13 @@ jobs:
           path: dist
       - name: Verify both packages
         run: cd dist && sha256sum --check *.sha256
-      - name: Publish release
+      - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/*.AppImage dist/*.zip --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+            gh release create "$GITHUB_REF_NAME" dist/*.AppImage dist/*.zip --verify-tag --draft --generate-notes
           fi

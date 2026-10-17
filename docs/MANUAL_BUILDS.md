@@ -9,7 +9,7 @@ Open **Actions → Build and release → Run workflow**, choose `main`, and run 
 From a shell with GitHub CLI authentication, the equivalent command is:
 
 ```bash
-gh workflow run release.yml --ref main -R leomoon/OCTR-NitroFueled-PC
+gh workflow run release.yml --ref main -R Ryu7w7/OCTR-NitroFueled-PC
 ```
 
 To build and publish automatically, push a new `v*` tag on a commit that contains the workflow. For example, after pushing the commit to `main`:
@@ -19,7 +19,7 @@ git tag v0.6.0
 git push origin v0.6.0
 ```
 
-The tag run performs the same checks and builds, then publishes a GitHub Release with both packages and their SHA-256 files. Linux assets are named `SacredFire-<version>-x86_64.AppImage`, with a matching `.sha256` and `.build.txt`; Windows assets are named `CTR-NitroFueled-PC-portable-<version>-windows.zip`, with a matching `.sha256`. Untagged manual builds use a `git describe` version such as `v0.5-8-gabcdef0`. A `main` push or pull request runs source checks without packaging.
+The tag run performs the same checks and builds, then creates a **draft** GitHub Release with the two packages: `SacredFire-<version>-x86_64.AppImage` and `CTR-NitroFueled-PC-portable-<version>-windows.zip`. Write the release notes, try the packages and publish the draft from the Releases page. The SHA-256 files and the AppImage's `.build.txt` (source commit and nixpkgs version) stay in the workflow run's artifacts, not in the release. Untagged manual builds use a `git describe` version such as `v0.5-8-gabcdef0`. A `main` push or pull request runs source checks without packaging.
 
 ## Build locally
 
