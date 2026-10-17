@@ -187,6 +187,18 @@ def server_key(key, host):
     return hmac.new(bytes.fromhex(key), host.strip().lower().encode('utf-8'), hashlib.sha256).hexdigest()
 
 
+def season_theme(host, port):
+    """The season theme the server announces (GET /ryunet/theme), or None when it does not answer.
+    scripts/patches.py loads it in every level (THEME_VALUES)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f'http://{host}:{port}/ryunet/theme', timeout=3) as reply:
+            theme = json.loads(reply.read(4096)).get('theme')
+    except (OSError, ValueError, AttributeError):
+        return None
+    return theme if theme in ('default', 'halloween', 'golden') else None
+
+
 def setup_online(env, config, data):
     ini_values = {}
     try:
@@ -273,6 +285,13 @@ def setup_online(env, config, data):
     }
     overrides_file.write_text(json.dumps(overrides, indent=2) + '\n', encoding='utf-8')
     say(f'RyuNET Online active -> server {host}:{auth_port}, user {name}')
+    # Every player loads the theme the server announces (bbport.ini theme= only applies offline).
+    if not env.get('BB_THEME'):
+        theme = season_theme(host, auth_port)
+        if theme:
+            env['BB_THEME'] = theme
+            if theme != 'default':
+                say(f'Season theme from the server: {theme}')
 
 
 def pump(stream):

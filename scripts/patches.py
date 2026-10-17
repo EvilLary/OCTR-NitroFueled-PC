@@ -113,6 +113,33 @@ def render_patches(settings):
     return [(f'render/{plan["label"]}',None,meta)]
 
 
+# Season events: the Grand Prix "hidden object" events still in the game (LooseData/
+# OctaneHiddenObjectGameplayData.igz in update2.pak): ghosts (the Spooky Grand Prix) or golden Wumpa
+# fruit that escape from crates, to be caught during races. The online config the official server
+# sent (NetConfig, CNetworkConfig._hiddenObjectMode) chose one; ours sends none, so the event is off.
+# On each level load the hidden-object manager (0xfb5f50 in eboot.elf) reads that mode from the
+# config ([[config+0x130]+0x18]) and calls its setMode (0xfb7710); the patch hands setMode a
+# constant instead: mov rdi,r13; mov esi,<mode>; 5-byte nop, in place of the 13-byte read.
+# EOctaneHiddenObjectGameplayModes: eOOGM_None 0, eOOGM_SpookyGhost 1, eOOGM_GoldenWumpa 2 (the
+# game itself swaps golden Wumpa for ghosts on Twilight Tour). BB_THEME (run.py: the season the
+# online server announces) or bbport.ini theme= picks it.
+THEME_VALUES={'default':0,'halloween':1,'golden':2}
+THEME_SIGNATURE='49 8b 87 30 01 00 00 4c 89 ef 8b 70 18 e8'
+
+
+def theme_patches(settings):
+    """The built-in patch element for the season event (none for the normal season)."""
+    theme=(os.environ.get('BB_THEME') or (settings or {}).get('theme') or 'default').strip().lower()
+    value=THEME_VALUES.get(theme,0)
+    if not value:
+        return []
+    meta=ET.Element('Metadata',Name=f'Season event {theme}',AppVer=APP_VERSION,AppElf='eboot.bin')
+    ET.SubElement(ET.SubElement(meta,'PatchList'),'Line',Type='bytes',Address='0x013b601b',
+                  Value=f'4c89efbe{value:02x}0000000f1f440000',Signature=THEME_SIGNATURE,
+                  SignatureOffset='0x0')
+    return [(f'theme/{theme}',None,meta)]
+
+
 def read_settings(path):
     """bbport.ini as a dict (key=value lines; # comments)."""
     settings={}
@@ -271,7 +298,8 @@ def main():
     segments=eboot_segments(elf)
     found=external_patches(a.patches_dir,a.app_version,a.title_id)
     settings=read_settings(a.settings)
-    writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings),
+    writes=compile_external(external_selection(found,a.patches_config,settings)+render_patches(settings)
+                            +theme_patches(settings),
                             segments,elf)
     write_blob(a.out,writes)
     print(f'Patches: {len(writes)} writes from {len(found)} available patches')
