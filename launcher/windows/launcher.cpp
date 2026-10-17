@@ -48,6 +48,7 @@
 #include "imgui_impl_win32.h"
 
 #include "discord_link.h"
+#include "nat_check.h"
 #include "discord_presence.h"
 #include "launcher_locales.h"
 
@@ -2927,6 +2928,81 @@ void DiscordAccountSection() {
     DiscordLinkStatusLines();
 }
 
+/// The NAT type test (nat_check.h), run on demand on a worker thread.
+struct NatState {
+    std::mutex mutex;
+    bool running = false, done = false;
+    NatCheck::Result result;
+};
+NatState g_nat;
+
+void NatTypeSection(const std::string& server) {
+    bool running, done;
+    NatCheck::Result result;
+    {
+        std::scoped_lock lock{g_nat.mutex};
+        running = g_nat.running;
+        done = g_nat.done;
+        result = g_nat.result;
+    }
+    ImGui::BeginDisabled(running);
+    if (ImGui::Button(T("Comprobar tipo de NAT", "Check NAT type"))) {
+        {
+            std::scoped_lock lock{g_nat.mutex};
+            g_nat.running = true;
+        }
+        std::thread([server] {
+            const NatCheck::Result r = NatCheck::Check(server);
+            std::scoped_lock lock{g_nat.mutex};
+            g_nat.result = r;
+            g_nat.running = false;
+            g_nat.done = true;
+        }).detach();
+    }
+    ImGui::EndDisabled();
+    HelpMarker(T("Comprueba si otros jugadores pueden conectarse directamente a tu PC. Pregunta a tu servidor RyuNET "
+                 "y a un servidor STUN público (Cloudflare) con qué dirección te ven y las compara aquí: tu IP no se "
+                 "muestra ni se guarda.",
+                 "Checks whether other players can connect to your PC directly. It asks your RyuNET server and a "
+                 "public STUN server (Cloudflare) which address they see you from and compares them here: your IP "
+                 "is neither shown nor saved."));
+    ImGui::SameLine();
+    if (running) {
+        ImGui::TextColored(kGrey, "%s", T("Comprobando...", "Checking..."));
+        return;
+    }
+    if (!done) return;
+    switch (result.type) {
+    case NatCheck::Type::Open:
+        ImGui::TextColored(kGreen, "%s", T("NAT tipo 1 (abierto): sin router de por medio.",
+                                           "NAT type 1 (open): no router in between."));
+        break;
+    case NatCheck::Type::Moderate:
+        ImGui::TextColored(kGreen, "%s", T("NAT tipo 2 (moderado): los demás jugadores pueden conectarse contigo.",
+                                           "NAT type 2 (moderate): other players can connect to you."));
+        break;
+    case NatCheck::Type::Strict:
+        ImGui::TextColored(kYellow, "%s", T("NAT tipo 3 (estricto): tu router cambia de puerto según con quién hables.",
+                                            "NAT type 3 (strict): your router changes ports for each destination."));
+        ImGui::TextWrapped("%s", T("Con otros jugadores de NAT estricto la conexión directa suele fallar y el juego pasa "
+                                   "por el túnel del servidor. Ayuda activar UPnP en el router o abrir el puerto UDP 3074 "
+                                   "hacia este PC.",
+                                   "Direct connections with other strict-NAT players often fail and the game goes "
+                                   "through the server's tunnel. Turning on UPnP in the router or forwarding UDP port "
+                                   "3074 to this PC helps."));
+        break;
+    case NatCheck::Type::Unknown:
+        ImGui::TextColored(kGrey, "%s",
+                           result.error == "server" ? T("El servidor no respondió (¿está bien escrito? ¿UDP 3074 bloqueado?).",
+                                                        "The server did not answer (is it spelled right? UDP 3074 blocked?).")
+                           : result.error == "dns" ? T("No se encontró el servidor.", "The server was not found.")
+                           : result.error == "stun" ? T("No se pudo comparar (el servidor STUN no respondió).",
+                                                        "Could not compare (the STUN server did not answer).")
+                                                    : T("No se pudo comprobar.", "Could not check."));
+        break;
+    }
+}
+
 void OnlineTab() {
     App& a = g_app;
     ImGui::TextColored(kGrey, "%s", T("Juego online con un servidor RyuNET. Se aplica al pulsar Jugar.",
@@ -2969,6 +3045,7 @@ void OnlineTab() {
         }
         HelpMarker(T("IP o dominio del servidor RyuNET (predeterminado: octr.ryu7w7.xyz, o 127.0.0.1 para servidor local). Puerto HTTP opcional :8080.",
                      "IP or domain of the RyuNET server (default: octr.ryu7w7.xyz, or 127.0.0.1 for local server). Optional HTTP port :8080."));
+        NatTypeSection(Trim(a.game.Get("online_server", "octr.ryu7w7.xyz")));
         ImGui::EndDisabled();
     }
 
