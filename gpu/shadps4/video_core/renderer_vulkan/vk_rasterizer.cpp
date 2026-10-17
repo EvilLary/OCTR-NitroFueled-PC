@@ -2831,10 +2831,21 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, const PreparedStage* pre
                                      reinterpret_cast<const void*>(vsharp.base_address),
                                      memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize()));
             }
-            if (vsharp.base_address == 0 || vsharp.GetSize() == 0) {
+            // bbport: a V# whose base is not mapped clamps to 0 bytes (a garbage V#: sizes of
+            // 1-3.8 GB). Bound as a 0-byte range, a write to it went to GPU address 0 on NVIDIA
+            // (invalid write, device lost, code 23): it gets the null descriptor, whose writes are
+            // dropped and reads give 0, like a V# with no base.
+            const u64 clamped = vsharp.base_address == 0 || vsharp.GetSize() == 0
+                                    ? 0
+                                    : memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+            if (clamped == 0 && vsharp.base_address != 0 && vsharp.GetSize() != 0) {
+                LOG_ERROR(Render, "Unmapped buffer at {:#x} ({} bytes) for stage {:#x}: null descriptor",
+                          vsharp.base_address, vsharp.GetSize(), stage.pgm_hash);
+            }
+            if (clamped == 0) {
                 buffer_infos.emplace_back(VK_NULL_HANDLE, 0, VK_WHOLE_SIZE);
             } else {
-                const u64 size = memory->ClampRangeSize(vsharp.base_address, vsharp.GetSize());
+                const u64 size = clamped;
                 if (size != vsharp.GetSize()) {
                     LOG_ERROR(Render, "Clamped size from {} to {} for stage {:#x}",
                               vsharp.GetSize(), size, stage.pgm_hash);
