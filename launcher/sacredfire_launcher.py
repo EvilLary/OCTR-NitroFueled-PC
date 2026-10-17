@@ -282,6 +282,67 @@ def connected_gamepads():
     return [tuple(line.split("\t", 1)) for line in run.stdout.splitlines() if "\t" in line]
 
 
+def discord_activity_for(ini, started, party):
+    """What Discord shows while the game runs, from bbport.ini: online with the nickname and a
+    joinable party (the Windows launcher's), or offline. party: (players, max) of the lobby the
+    player hosts, None when unknown."""
+    nick, server = ini.get("online_name", "").strip(), ini.get("online_server", ONLINE_SERVER).strip()
+    if ini.get("online") != "1":
+        return discord_ipc.Activity(tr("Playing offline"), start=started, large_image="logo",
+                                    large_text="Crash Team Racing Nitro-Fueled")
+    activity = discord_ipc.Activity(tr("Playing online"), state=tr("Nickname: {}").format(nick) if nick else "",
+                                    start=started, large_image="logo", large_text="Crash Team Racing Nitro-Fueled")
+    if nick_ok(nick) and ryunet_http.valid_server(server):
+        players, maximum = party or (1, 8)  # a server without /ryunet/party: offer it anyway
+        if 0 < players <= maximum:
+            activity.party_id = f"ctr:{server.lower()}:{nick.lower()}"
+            activity.party_size, activity.party_max = players, maximum
+            if players < maximum:
+                activity.join_secret = f"ctr1|{server}|{nick}"
+    return activity
+
+
+def parse_join_secret(secret):
+    """(server, nickname) of a join secret this launcher (or the Windows one) wrote, else None."""
+    parts = secret.split("|")
+    if len(parts) != 3 or parts[0] != "ctr1" or not ryunet_http.valid_server(parts[1]) or not nick_ok(parts[2]):
+        return None
+    return parts[1], parts[2]
+
+
+def apply_join(server, nick):
+    """An accepted invite: the host becomes a friend (the game lists friends' lobbies as
+    joinable), online on that server, and the game joins their session by itself, as a PS4
+    invitation accepted in the system UI (src/runtime_services.c reads ryunet_join.txt next to
+    bbport.ini, also while it runs). Returns the friends list written."""
+    ini, lines = load_ini()
+    friends = [f.strip() for f in ini.get("online_friends", "").split(",") if f.strip()]
+    if nick.lower() not in [f.lower() for f in friends]:
+        friends.append(nick)
+    ini.update({"online": "1", "online_server": server, "online_friends": ",".join(friends)})
+    save_ini(ini, lines)
+    try:
+        (ini_path().parent / "ryunet_join.txt").write_text(
+            f"session=cusa13795-session-{nick}\nhost={nick}\ntime={int(time.time())}\n", encoding="utf-8")
+    except OSError:
+        pass
+    return ",".join(friends)
+
+
+def write_announcement(answer):
+    """A server announcement for the game, which draws it over the picture (ryunet_announce.txt
+    next to bbport.ini). Returns its text."""
+    text = str(answer.get("text", "")).replace("\n", " ")
+    try:
+        expires = int(time.time()) + int(answer.get("expires_in", 0))
+        (ini_path().parent / "ryunet_announce.txt").write_text(
+            f"id={answer.get('id')}\nlevel={answer.get('level', '')}\nexpires={expires}\ntext={text}\n",
+            encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+    return text
+
+
 def flat_button(icon, tooltip, handler):
     button = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tooltip)
     button.add_css_class("flat")
@@ -1159,21 +1220,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         """What Discord shows while the game runs; joinable online (the Windows launcher's)."""
         if self.process is None:
             return None
-        nick, server = self.ini.get("online_name", "").strip(), self.ini.get("online_server", ONLINE_SERVER).strip()
-        if self.ini.get("online") != "1":
-            return discord_ipc.Activity(tr("Playing offline"), start=self.game_started, large_image="logo",
-                                        large_text="Crash Team Racing Nitro-Fueled")
-        activity = discord_ipc.Activity(tr("Playing online"), state=tr("Nickname: {}").format(nick) if nick else "",
-                                        start=self.game_started, large_image="logo",
-                                        large_text="Crash Team Racing Nitro-Fueled")
-        if nick_ok(nick) and ryunet_http.valid_server(server):
-            players, maximum = self.party or (1, 8)  # a server without /ryunet/party: offer it anyway
-            if 0 < players <= maximum:
-                activity.party_id = f"ctr:{server.lower()}:{nick.lower()}"
-                activity.party_size, activity.party_max = players, maximum
-                if players < maximum:
-                    activity.join_secret = f"ctr1|{server}|{nick}"
-        return activity
+        return discord_activity_for(self.ini, self.game_started, self.party)
 
     def poll_party(self):
         """The lobby this player hosts, every 5 s while the game runs online: Discord's
@@ -1204,24 +1251,17 @@ class LauncherWindow(Adw.ApplicationWindow):
             if not answer or str(answer.get("id")) == self.announce_seen:
                 return
             self.announce_seen = str(answer.get("id"))
-            text = str(answer.get("text", "")).replace("\n", " ")
-            try:
-                expires = int(time.time()) + int(answer.get("expires_in", 0))
-                (ini_path().parent / "ryunet_announce.txt").write_text(
-                    f"id={self.announce_seen}\nlevel={answer.get('level', '')}\nexpires={expires}\ntext={text}\n",
-                    encoding="utf-8")
-            except (OSError, ValueError):
-                pass
+            text = write_announcement(answer)
             self.toasts.add_toast(Adw.Toast(title=tr("Server notice: {}").format(text), timeout=10))
         self.in_thread(lambda: ryunet_http.announcement(DATA_DIR, server), done)
 
     def on_discord_join(self, secret):
         """A join secret from Discord: "ctr1|<server>|<nickname>"."""
-        parts = secret.split("|")
-        if len(parts) != 3 or parts[0] != "ctr1" or not ryunet_http.valid_server(parts[1]) or not nick_ok(parts[2]):
+        parsed = parse_join_secret(secret)
+        if not parsed:
             self.toasts.add_toast(Adw.Toast(title=tr("That Discord invite is not from this launcher.")))
             return
-        server, nick = parts[1], parts[2]
+        server, nick = parsed
         if nick.lower() == self.ini.get("online_name", "").lower():
             return  # our own invite
         self.present()
@@ -1238,19 +1278,11 @@ class LauncherWindow(Adw.ApplicationWindow):
         """The host becomes a friend (the game lists friends' lobbies as joinable) and the game
         joins their session by itself, as a PS4 invitation accepted in the system UI
         (src/runtime_services.c reads ryunet_join.txt next to bbport.ini)."""
+        friends = apply_join(server, nick)
         self.ini, self.ini_lines = load_ini()
-        friends = [f.strip() for f in self.ini.get("online_friends", "").split(",") if f.strip()]
-        if nick.lower() not in [f.lower() for f in friends]:
-            friends.append(nick)
-        self.set_ini({"online": "1", "online_server": server, "online_friends": ",".join(friends)})
         self.online_row.set_active(True)
         self.server_row.set_text(server)
-        self.friends_row.set_text(",".join(friends))
-        try:
-            (ini_path().parent / "ryunet_join.txt").write_text(
-                f"session=cusa13795-session-{nick}\nhost={nick}\ntime={int(time.time())}\n", encoding="utf-8")
-        except OSError:
-            pass
+        self.friends_row.set_text(friends)
         if self.process is not None:
             self.toasts.add_toast(Adw.Toast(title=tr("{}'s invite accepted: the game joins their match in a few seconds. "
                                                      "If it does not, open Friends in the game and join {}.").format(nick, nick),
@@ -1492,13 +1524,85 @@ class LauncherApp(Adw.Application):
 
 
 def play():
-    """--play: the game with the saved settings, no window (Steam Deck game mode)."""
+    """--play: the game with the saved settings, no window (Steam's shortcut, the Steam Deck's
+    game mode). The game runs as a child while this process does what the window would: the
+    player's Discord status with invites and "Ask to Join", and server announcements."""
     settings = load_settings()
+    set_language(settings.get("ui_language", ""))
     if not (Path(settings["game_dir"]).expanduser() / "eboot.bin").is_file():
         print("SacredFire: choose the game folder in the launcher first", file=sys.stderr)
         return 1
     os.chdir(PORT_DIR)
-    os.execvpe("bash", ["bash", str(PORT_DIR / "run.sh")], game_environment(settings))
+    env = game_environment(settings)
+    steam_shortcuts.stable_appimage_link()
+    if not settings.get("discord_rpc", True):
+        os.execvpe("bash", ["bash", str(PORT_DIR / "run.sh")], env)  # nothing to do alongside
+    child = subprocess.Popen(["bash", str(PORT_DIR / "run.sh")], env=env)
+
+    def forward(signum, _frame):
+        # Steam stops the game by signalling this process: the game gets it too.
+        try:
+            child.send_signal(signum)
+        except OSError:
+            pass
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, forward)
+
+    import threading
+    presence = discord_ipc.Presence()
+    presence.accept_requests = settings.get("discord_accept_requests", True)
+    app_id = settings.get("discord_app_id") or DISCORD_APP_ID
+    started = int(time.time())
+    state = {"party": None, "party_at": 0.0, "announce_at": 0.0, "seen": "", "busy": set()}
+
+    def in_background(name, work):
+        if name in state["busy"]:
+            return
+        state["busy"].add(name)
+
+        def run():
+            try:
+                work()
+            finally:
+                state["busy"].discard(name)
+        threading.Thread(target=run, daemon=True).start()
+
+    while child.poll() is None:
+        ini, _lines = load_ini()
+        online = ini.get("online") == "1"
+        server, nick = ini.get("online_server", ONLINE_SERVER), ini.get("online_name", "")
+        presence.update(True, app_id, discord_activity_for(ini, started, state["party"]))
+        while (secret := presence.take_join()) is not None:
+            parsed = parse_join_secret(secret)
+            if not parsed or parsed[1].lower() == nick.lower():
+                continue
+            if parsed[0].lower() != server.strip().lower():
+                # Never switch servers silently, and there is no window to ask in.
+                print(f"SacredFire: Discord invite from {parsed[1]} for another server ({parsed[0]}) ignored; "
+                      "accept it with the launcher open", file=sys.stderr)
+                continue
+            apply_join(*parsed)
+            print(f"SacredFire: {parsed[1]}'s Discord invite accepted: the game joins their match", file=sys.stderr)
+        now = time.monotonic()
+        if online and now - state["party_at"] >= 5:
+            state["party_at"] = now
+
+            def ask_party(server=server, nick=nick):
+                state["party"] = ryunet_http.party(DATA_DIR, server, nick)
+            in_background("party", ask_party)
+        if online and now - state["announce_at"] >= 30:
+            state["announce_at"] = now
+
+            def ask_announcement(server=server):
+                answer = ryunet_http.announcement(DATA_DIR, server)
+                if answer and str(answer.get("id")) != state["seen"]:
+                    state["seen"] = str(answer.get("id"))
+                    write_announcement(answer)
+            in_background("announce", ask_announcement)
+        time.sleep(1)
+    presence.shutdown()
+    code = child.returncode
+    return code if code >= 0 else 128 - code
 
 
 if __name__ == "__main__":
