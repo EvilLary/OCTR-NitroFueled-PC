@@ -5178,11 +5178,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     const UINT n = GetWindowsDirectoryW(fonts, MAX_PATH);
     const fs::path segoe = fs::path(std::wstring(fonts, n)) / L"Fonts" / L"segoeui.ttf";
     std::error_code ec;
+    // Japanese and Chinese, which Segoe UI and the CTR font lack: Windows' own CJK fonts merged in
+    // as fallbacks (ImGui 1.92 loads their glyphs only when a text uses them).
+    const auto merge_fallbacks = [&](bool with_segoe) {
+        std::vector<fs::path> files;
+        if (with_segoe) files.push_back(segoe);
+        for (const wchar_t* name : {L"msyh.ttc", L"YuGothM.ttc", L"msgothic.ttc"})
+            files.push_back(fs::path(std::wstring(fonts, n)) / L"Fonts" / name);
+        for (const fs::path& file : files) {
+            if (!fs::is_regular_file(file, ec)) continue;
+            ImFontConfig merge;
+            merge.MergeMode = true;
+            io.Fonts->AddFontFromFileTTF(PathText(file).c_str(), 0.0f, &merge);
+        }
+    };
     if (fs::is_regular_file(segoe, ec)) io.Fonts->AddFontFromFileTTF(PathText(segoe).c_str());
     else io.Fonts->AddFontDefault();
+    merge_fallbacks(false);
     const fs::path ctr_font = g_app.root / L"art" / L"ctr-menu.ttf";
-    if (fs::is_regular_file(ctr_font, ec))
+    if (fs::is_regular_file(ctr_font, ec)) {
         g_ctr_font = io.Fonts->AddFontFromFileTTF(PathText(ctr_font).c_str(), style.FontSizeBase);
+        merge_fallbacks(true);  // Cyrillic and CJK labels in the CTR font's places
+    }
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_device, g_context);
