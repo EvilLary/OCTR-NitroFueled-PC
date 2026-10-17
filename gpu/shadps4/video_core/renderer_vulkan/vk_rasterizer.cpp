@@ -3657,10 +3657,28 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         // Stencil writes can be enabled while depth writes are off.
         const bool stencil_write =
             has_stencil && regs.depth_control.stencil_enable && !desc.view_info.is_storage;
-        const auto new_layout = desc.view_info.is_storage
+        // SacredFire: a pass that clears depth or stencil writes it, whatever the write enables
+        // say (a depth clear also comes from the HTILE's fast-clear state with depth writes off,
+        // a stencil clear with stencil off). The aspect it clears needs a writable layout:
+        // clearing one in a read-only layout is invalid, and on NVIDIA such passes came right
+        // before device losses (an invalid write at GPU address 0, code 23).
+        const bool clears_depth = is_depth_clear && regs.depth_buffer.DepthValid();
+        const bool clears_stencil = has_stencil && is_stencil_clear && regs.depth_buffer.StencilValid();
+        const bool depth_writable = desc.view_info.is_storage || clears_depth;
+        const bool stencil_writable = stencil_write || clears_stencil;
+        if ((clears_depth && !desc.view_info.is_storage) || (clears_stencil && !stencil_write)) {
+            static std::atomic<u32> upgraded{0};
+            if (upgraded.fetch_add(1, std::memory_order_relaxed) == 0) {
+                std::printf("Depth target: a pass clears %s with writes off; given a writable "
+                            "layout (%ux%u, first time)\n",
+                            clears_depth && !desc.view_info.is_storage ? "depth" : "stencil",
+                            image.info.size.width, image.info.size.height);
+            }
+        }
+        const auto new_layout = depth_writable
                                     ? has_stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
                                                   : vk::ImageLayout::eDepthAttachmentOptimal
-                                : stencil_write
+                                : stencil_writable
                                     ? vk::ImageLayout::eDepthReadOnlyStencilAttachmentOptimal
                                 : has_stencil ? vk::ImageLayout::eDepthStencilReadOnlyOptimal
                                               : vk::ImageLayout::eDepthReadOnlyOptimal;
