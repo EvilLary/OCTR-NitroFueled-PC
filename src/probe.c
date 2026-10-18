@@ -894,6 +894,8 @@ int main(int argc, char **argv) {
         snprintf(sfo,sizeof(sfo),"%s/sce_sys/param.sfo",app0);
         if (sfo_value(sfo,"INSTALL_DIR_SAVEDATA",id,sizeof(id),NULL) || sfo_value(sfo,"TITLE_ID",id,sizeof(id),NULL))
             runtime_savedata_configure(id);
+        char title_id[16]="";
+        if (sfo_value(sfo,"TITLE_ID",title_id,sizeof(title_id),NULL)) runtime_np_set_title(title_id);
     }
     bbgpu_register_kernel();
 #ifdef _WIN32

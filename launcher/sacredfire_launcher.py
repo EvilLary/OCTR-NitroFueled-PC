@@ -358,15 +358,33 @@ def write_patch_config(enabled, disabled):
 SAVE_PARAM_SIZE = 1328  # char title[128], subtitle[128], detail[1024]; u32; i32; i64 mtime; 32 bytes
 
 
+# The editions the port runs: the Americas (CUSA13795) and Europe (CUSA14876). Saves, the shader
+# cache and DLC follow the chosen game's title ID (set_game_title); the Americas one by default.
+GAME_TITLES = ("CUSA13795", "CUSA14876")
+GAME_TITLE = ["CUSA13795"]
+
+
+def set_game_title(game_dir):
+    """The title ID of the game folder (param.sfo), when it is one of GAME_TITLES."""
+    try:
+        title = game_check.sfo_info(Path(game_dir).expanduser()).get("TITLE_ID", "")
+    except Exception:  # an unreadable param.sfo keeps the last one
+        return GAME_TITLE[0]
+    if title in GAME_TITLES:
+        GAME_TITLE[0] = title
+    return GAME_TITLE[0]
+
+
 def save_root(user_dir):
+    title = GAME_TITLE[0]
     base = Path(user_dir) / "savedata"
     try:
         for entry in sorted(base.iterdir()):
-            if (entry / "CUSA13795").is_dir():
-                return entry / "CUSA13795"
+            if (entry / title).is_dir():
+                return entry / title
     except OSError:
         pass
-    return base / "1" / "CUSA13795"
+    return base / "1" / title
 
 
 def backup_root():
@@ -771,7 +789,7 @@ class LauncherWindow(Adw.ApplicationWindow):
 
         game = Adw.PreferencesGroup(title=tr("Game"),
                                     description=tr("The dumped game with its 1.21 update merged over the base (eboot.bin, sce_module, ...)"))
-        self.game_row = Adw.ActionRow(title=tr("Game folder (CUSA13795)"))
+        self.game_row = Adw.ActionRow(title=tr("Game folder (CUSA13795 or CUSA14876)"))
         self.game_status = Gtk.Image(valign=Gtk.Align.CENTER)
         self.game_row.add_suffix(self.game_status)
         self.game_row.add_suffix(flat_button("folder-open-symbolic", tr("Choose the folder with eboot.bin"), self.on_choose_game))
@@ -1016,6 +1034,7 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def update_game_status(self):
         path = self.game_dir()
+        set_game_title(path)
         ok = bool(self.settings["game_dir"]) and (path / "eboot.bin").is_file()
         self.game_row.set_subtitle(str(path) if self.settings["game_dir"] else tr("not chosen"))
         problem = game_check.problem(path) if ok else None
@@ -1030,7 +1049,8 @@ class LauncherWindow(Adw.ApplicationWindow):
             problem = ("other_title", profile["title"], profile["version"])
             self.game_row.set_subtitle(f"{path}\n{tooltip}")
         else:
-            tooltip = f"{GAME} CUSA13795, 1.21"
+            info = game_check.sfo_info(path)
+            tooltip = f"{GAME} {info.get('TITLE_ID', '')}, {info.get('APP_VER', '').lstrip('0')}"
         self.game_status.set_from_icon_name("object-select-symbolic" if ok and not problem else "dialog-warning-symbolic")
         self.game_status.set_tooltip_text(tooltip)
         self.launch_button.set_sensitive((ok and not problem) or self.process is not None)
@@ -1602,7 +1622,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         if self.dlc_dir().is_dir():
             for path in sorted(self.dlc_dir().iterdir()):
                 if content_profile.is_candidate(path):
-                    items.append((path, *content_profile.describe_addon(path, "CUSA13795")))
+                    items.append((path, *content_profile.describe_addon(path, GAME_TITLE[0])))
         if not items:
             self.dlc_group.add(Adw.ActionRow(title=tr("No DLC in the dlc folder")))
         for path, label, title, problem in sorted(items, key=lambda i: i[2].lower()):
@@ -1648,7 +1668,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             self.dlc_dir().mkdir(parents=True, exist_ok=True)
             for i in range(files.get_n_items()):
                 source = Path(files.get_item(i).get_path())
-                _label, _title, problem = content_profile.describe_addon(source, "CUSA13795")
+                _label, _title, problem = content_profile.describe_addon(source, GAME_TITLE[0])
                 if problem:
                     problems.append(f"{source.name}: {problem}")
                     continue
