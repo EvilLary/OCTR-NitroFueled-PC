@@ -418,6 +418,18 @@ def main():
         # DLC (optional): the player's add-on packages in dlc\ (BB_DLC_DIR), reported installed.
         run_python('scripts/content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'),
                    '--dlc-dir', env.get('BB_DLC_DIR', data / 'dlc'))
+        # The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the
+        # game's own shaders, so new tracks and racers do not stop the game to compile them.
+        # BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
+        recipe_setting = env.get('BB_SHADER_RECIPE', '')
+        recipe = Path(recipe_setting) if recipe_setting not in ('', '0') else PORT / 'shaders' / 'recipe.zip'
+        if recipe_setting != '0' and recipe.is_file():
+            run_python('scripts/gcn_shaders.py', game, '--out', out)
+            env['BB_SHADER_RECIPE'] = str(recipe)
+            env['BB_GCN_SHADERS'] = str(out / 'gcn_shaders.bin')
+        else:
+            env.pop('BB_SHADER_RECIPE', None)
+            env.pop('BB_GCN_SHADERS', None)
         env.setdefault('BB_NEO', '0')
         apply_render_res(env, config)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')

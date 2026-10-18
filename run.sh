@@ -82,6 +82,18 @@ fi
 # SacredFire: symbol names for this eboot's host-side imports (shadPS4's aerolib list, fetched once).
 "$PYTHON" tools/gen_import_names.py --out "$out"
 "$PYTHON" scripts/content_profile.py "$game" --out "$out" --sku "${BB_CONTENT_SKU:-full}"
+# The shader recipe (shaders/recipe.zip): prepared for this GPU at the first start, from the game's
+# own shaders, so new tracks and racers do not stop the game to compile them (as run.py).
+# BB_SHADER_RECIPE=0 leaves it out; another path uses that recipe.
+recipe=${BB_SHADER_RECIPE:-shaders/recipe.zip}
+if [[ ${BB_SHADER_RECIPE:-} != 0 && -f $recipe ]]; then
+    "$PYTHON" scripts/gcn_shaders.py "$game" --out "$out"
+    BB_SHADER_RECIPE=$(realpath "$recipe")
+    BB_GCN_SHADERS=$(realpath "$out")/gcn_shaders.bin
+    export BB_SHADER_RECIPE BB_GCN_SHADERS
+else
+    unset BB_SHADER_RECIPE BB_GCN_SHADERS
+fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
 # https://github.com/illusionyy/PS-Game-Patch), chosen in the in-game menu (bbport.ini patch_*
