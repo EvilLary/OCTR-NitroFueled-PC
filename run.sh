@@ -65,7 +65,10 @@ if [[ ! -f $game/eboot.bin ]]; then echo "No eboot.bin in $game (set BB_GAME_DIR
 # (Crash Team Racing Nitro-Fueled CUSA13795 1.21) and names the profile the runtime reads.
 profile=$("$PYTHON" scripts/game_check.py "$game") || { echo "$profile" >&2; exit 2; }
 export BB_GAME_PROFILE=${profile:-ctr}
-read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game")
+# The edition's title ID and version (the EU edition has its own patches); the USA 1.21 update when
+# param.sfo cannot be read, as run.py.
+read -r title_id app_version < <("$PYTHON" scripts/game_check.py --info "$game") || true
+title_id=${title_id:-CUSA13795} app_version=${app_version:-01.21}
 echo "Game profile: $BB_GAME_PROFILE ($title_id $app_version)"
 original_game=$game
 game=$("$PYTHON" scripts/mods.py "$game" --out "$out" \
