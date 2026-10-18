@@ -60,9 +60,29 @@ TITLE = "SacredFire"
 GAME = "Crash Team Racing: Nitro-Fueled"
 
 # Choices: (label, value); the first is the default.
-# The languages CUSA13795 (the Americas build) has, as PS4 system language codes.
+# The languages each edition has (the .lng texts in its archives), as PS4 system language codes:
+# the Americas build (CUSA13795) and the European one (CUSA14876). The list follows the chosen game.
 LANGUAGES = [("English", "1"), ("Spanish (Latin America)", "20"), ("French", "2"),
              ("Portuguese (Brazil)", "17")]
+LANGUAGES_EU = [("English", "1"), ("Spanish (Spain)", "3"), ("French", "2"), ("German", "4"),
+                ("Italian", "5"), ("Arabic", "21")]
+REGIONS = {"CUSA13795": "USA", "CUSA14876": "EU"}
+
+
+def languages_for(title):
+    return LANGUAGES_EU if title == "CUSA14876" else LANGUAGES
+
+
+def language_for(title, saved):
+    """The saved game language where the edition has it, else its counterpart (Spanish), else English."""
+    codes = [code for _label, code in languages_for(title)]
+    if saved in codes:
+        return saved
+    if saved == "3" and "20" in codes:
+        return "20"
+    if saved == "20" and "3" in codes:
+        return "3"
+    return "1"
 PRESENT_MODES = [("Mailbox", "Mailbox"), ("FIFO (VSync)", "Fifo"),
                  ("FIFO Relaxed", "FifoRelaxed"), ("Immediate", "Immediate")]
 # The game's FPS limit (bbport.ini fps_limit; the in-game menu offers the same values). Above 30
@@ -90,9 +110,14 @@ VOLUME_DEFAULT = 100
 INI_PATCHES = {"CrashTeamRacing.xml/60 FPS Unlock": "patch_60fps",
                "CrashTeamRacing.xml/Disable Motion Blur": "patch_no_motion_blur",
                "CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p",
-               "CrashTeamRacingUnlockAll.xml/Unlock Everything": "patch_unlock_all"}
+               "CrashTeamRacingUnlockAll.xml/Unlock Everything": "patch_unlock_all",
+               # The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+               "CrashTeamRacingEU.xml/60 FPS Unlock": "patch_60fps",
+               "CrashTeamRacingEU.xml/Disable Motion Blur": "patch_no_motion_blur",
+               "CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p"}
 # Set by the online switch, not by hand (patches.py turns it on for online play).
-HIDDEN_PATCHES = {"CrashTeamRacingOnline.xml/Online: custom Demonware key"}
+HIDDEN_PATCHES = {"CrashTeamRacingOnline.xml/Online: custom Demonware key",
+                  "CrashTeamRacingOnlineEU.xml/Online: custom Demonware key"}
 
 DEFAULTS = {
     "ui_language": "",
@@ -322,13 +347,32 @@ def user_patches_dir():
     return DATA_DIR / "patches"
 
 
-def patch_list():
-    """[(key, name, author, version, note, default_on, file)] of the patches the game can use."""
+def patch_file_title(path):
+    """The CTR edition a patch file names in <TitleID> (CUSA13795 / CUSA14876), "" for any game."""
+    import xml.etree.ElementTree as ET
+    try:
+        ids = [e.text.strip() for e in ET.parse(path).getroot().iter("ID") if e.text]
+    except (OSError, ET.ParseError):
+        return ""
+    return next((i for i in ids if i in REGIONS), "")
+
+
+def patch_list(title=None, version=None):
+    """[(key, name, author, version, note, default_on, file, file title)] of the patches the game
+    can use: those for its title and version (as run.sh applies them), the defaults when unknown."""
     import patches as patch_files
-    found = patch_files.all_external_patches([PORT_DIR / "patches", user_patches_dir()])
-    return [(key, meta.get("Name", ""), meta.get("Author", ""), meta.get("PatchVer", ""), meta.get("Note", ""),
-             meta.get("isEnabled", "false").lower() == "true", path)
-            for key, path, meta in found if key not in HIDDEN_PATCHES]
+    found = patch_files.all_external_patches([PORT_DIR / "patches", user_patches_dir()],
+                                             version or patch_files.APP_VERSION, title or patch_files.TITLE_ID)
+    listed = []
+    for key, path, meta in found:
+        if key in HIDDEN_PATCHES:
+            continue
+        file_title = patch_file_title(path)
+        if title and file_title and file_title != title:
+            continue
+        listed.append((key, meta.get("Name", ""), meta.get("Author", ""), meta.get("PatchVer", ""), meta.get("Note", ""),
+                       meta.get("isEnabled", "false").lower() == "true", path, file_title))
+    return listed
 
 
 def patch_config_path():
@@ -362,16 +406,18 @@ SAVE_PARAM_SIZE = 1328  # char title[128], subtitle[128], detail[1024]; u32; i32
 # cache and DLC follow the chosen game's title ID (set_game_title); the Americas one by default.
 GAME_TITLES = ("CUSA13795", "CUSA14876")
 GAME_TITLE = ["CUSA13795"]
+GAME_VERSION = [""]  # its APP_VER (the EU base game is 01.00), "" until a game is chosen
 
 
 def set_game_title(game_dir):
     """The title ID of the game folder (param.sfo), when it is one of GAME_TITLES."""
     try:
-        title = game_check.sfo_info(Path(game_dir).expanduser()).get("TITLE_ID", "")
+        info = game_check.sfo_info(Path(game_dir).expanduser())
     except Exception:  # an unreadable param.sfo keeps the last one
         return GAME_TITLE[0]
-    if title in GAME_TITLES:
-        GAME_TITLE[0] = title
+    if info.get("TITLE_ID", "") in GAME_TITLES:
+        GAME_TITLE[0] = info["TITLE_ID"]
+        GAME_VERSION[0] = info.get("APP_VER", "")
     return GAME_TITLE[0]
 
 
@@ -800,7 +846,10 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.user_row.add_suffix(flat_button("folder-symbolic", tr("Open in the file manager"),
                                              lambda _b: open_folder(self, self.user_dir())))
         game.add(self.user_row)
-        self.language_row = combo_row(tr("Game language"), None, LANGUAGES, self.settings["language"])
+        self.language_title = GAME_TITLE[0]
+        self.language_row = combo_row(tr("Game language"), tr("The languages of your edition of the game"),
+                                      languages_for(self.language_title),
+                                      language_for(self.language_title, self.settings["language"]))
         game.add(self.language_row)
         page.add(game)
 
@@ -1034,7 +1083,16 @@ class LauncherWindow(Adw.ApplicationWindow):
 
     def update_game_status(self):
         path = self.game_dir()
-        set_game_title(path)
+        title = set_game_title(path)
+        if hasattr(self, "language_row") and title != self.language_title:
+            # Another edition: its own languages (Spanish follows: Latin American / Spain's).
+            current = combo_value(self.language_row)
+            self.language_title = title
+            choices = languages_for(title)
+            self.language_row.set_model(Gtk.StringList.new([tr(label) for label, _code in choices]))
+            self.language_row.values = [code for _label, code in choices]
+            self.language_row.set_selected(self.language_row.values.index(language_for(title, current)))
+            self.fill_patches()
         ok = bool(self.settings["game_dir"]) and (path / "eboot.bin").is_file()
         self.game_row.set_subtitle(str(path) if self.settings["game_dir"] else tr("not chosen"))
         problem = game_check.problem(path) if ok else None
@@ -1347,9 +1405,12 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         if self.patches_group is not None:
             self.patches_page.remove(self.patches_group)
-        self.patches_group = Adw.PreferencesGroup(title=tr("Patches found"))
+        title = GAME_TITLE[0]
+        self.patches_group = Adw.PreferencesGroup(
+            title=tr("Patches found"),
+            description=tr("Your game: {} edition ({}). Its patches are shown.").format(REGIONS.get(title, ""), title))
         try:
-            found = patch_list()
+            found = patch_list(title, GAME_VERSION[0])
         except Exception as error:  # a broken file must not take the page down
             found = []
             self.patches_group.add(Adw.ActionRow(title=GLib.markup_escape_text(str(error))))
@@ -1358,7 +1419,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         enabled, disabled = read_patch_config()
         render_res_chosen = bool(combo_value(self.render_res_row)) if hasattr(self, "render_res_row") else False
         bundled = (PORT_DIR / "patches").resolve()
-        for key, name, author, version, note, default_on, path in found:
+        for key, name, author, version, note, default_on, path, file_title in found:
             ini_key = INI_PATCHES.get(key)
             if ini_key:
                 on = self.ini.get(ini_key) == "1"
@@ -1377,7 +1438,9 @@ class LauncherWindow(Adw.ApplicationWindow):
             if note:
                 details.append(note)
             details.append(key)
-            row = Adw.SwitchRow(title=GLib.markup_escape_text(name or key),
+            region = REGIONS.get(file_title, "")
+            label = f"{name or key} [{region}]" if region else (name or key)
+            row = Adw.SwitchRow(title=GLib.markup_escape_text(label),
                                 subtitle=GLib.markup_escape_text("\n".join(details)), active=on)
             if ini_key == "patch_pro_1080p" and render_res_chosen:
                 row.set_sensitive(False)

@@ -589,6 +589,16 @@ constexpr Choice kGameLanguages[] = {
     {"Francés", "French", "2"},
     {"Portugués (Brasil)", "Portuguese (Brazil)", "17"},
 };
+// The European build (CUSA14876) has English, Spain's Spanish (3), French, German (4), Italian (5)
+// and Arabic (21): the .lng texts in its archives.
+constexpr Choice kGameLanguagesEU[] = {
+    {"Inglés", "English", "1"},
+    {"Español (España)", "Spanish (Spain)", "3"},
+    {"Francés", "French", "2"},
+    {"Alemán", "German", "4"},
+    {"Italiano", "Italian", "5"},
+    {"Árabe", "Arabic", "21"},
+};
 constexpr Choice kPresentModes[] = {
     {"Mailbox (recomendado)", "Mailbox (recommended)", "Mailbox"},
     {"FIFO (VSync)", "FIFO (VSync)", "Fifo"},
@@ -619,6 +629,7 @@ struct Backup {
 
 struct PatchInfo {
     std::string key, name, author, note, version;
+    std::string title;  // the edition its file is for (CUSA13795, CUSA14876), "" for any game
     bool default_on = false;
     const char* ini_key = nullptr;
 };
@@ -1277,15 +1288,39 @@ void StartMerge(std::vector<fs::path> sources) {
     });
 }
 
-const char* DefaultGameLanguage() { return g_spanish ? "20" : "1"; }
+/// The European edition is chosen (its languages differ from the Americas build's).
+bool IsEuGame() { return GameTitle() == L"CUSA14876"; }
 
-/// The game language to start with: the saved one when the build has it, else the default (older
-/// launchers saved codes this build lacks, such as 3 for Spain's Spanish).
+/// The game language of the launcher's own language, where the chosen edition has it.
+const char* DefaultGameLanguage() {
+    const bool eu = IsEuGame();
+    if (g_active_locale == "es") return eu ? "3" : "20";
+    if (g_active_locale == "fr") return "2";
+    if (eu && g_active_locale == "de") return "4";
+    if (eu && g_active_locale == "it") return "5";
+    if (!eu && g_active_locale == "pt_BR") return "17";
+    return "1";
+}
+
+/// The game language to start with: the saved one when the chosen edition has it, else its
+/// counterpart there (Spanish: Latin American in the Americas build, Spain's in the European one),
+/// else the default.
 std::string GameLanguage() {
     const std::string saved = g_app.launcher.Get("language");
-    for (const auto& c : kGameLanguages)
-        if (saved == c.value) return saved;
-    if (saved == "3") return "20"; // Spanish: the Latin American one this build has
+    const bool eu = IsEuGame();
+    auto has = [&](const std::string& code) {
+        if (eu) {
+            for (const auto& c : kGameLanguagesEU)
+                if (code == c.value) return true;
+        } else {
+            for (const auto& c : kGameLanguages)
+                if (code == c.value) return true;
+        }
+        return false;
+    };
+    if (has(saved)) return saved;
+    if (saved == "3" && !eu) return "20";
+    if (saved == "20" && eu) return "3";
     return DefaultGameLanguage();
 }
 
@@ -2005,7 +2040,18 @@ constexpr std::pair<const char*, const char*> kIniPatches[] = {
     {"CrashTeamRacing.xml/Disable Motion Blur", "patch_no_motion_blur"},
     {"CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
     {"CrashTeamRacingUnlockAll.xml/Unlock Everything", "patch_unlock_all"},
+    // The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+    {"CrashTeamRacingEU.xml/60 FPS Unlock", "patch_60fps"},
+    {"CrashTeamRacingEU.xml/Disable Motion Blur", "patch_no_motion_blur"},
+    {"CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)", "patch_pro_1080p"},
 };
+
+/// "USA" or "EU" for a CTR title ID, "" otherwise.
+const char* RegionOf(const std::string& title) {
+    if (title == "CUSA13795") return "USA";
+    if (title == "CUSA14876") return "EU";
+    return "";
+}
 
 std::string XmlUnescape(std::string s) {
     const std::pair<const char*, const char*> entities[] = {
@@ -2051,11 +2097,16 @@ std::vector<PatchInfo> LoadPatches() {
         const std::string xml = ReadText(file);
         // Files naming other games are skipped; a file without <ID> applies to any.
         bool any_id = false, ours = false;
+        std::string file_title;
         for (size_t at = 0; (at = xml.find("<ID>", at)) != std::string::npos; at += 4) {
             const size_t close = xml.find("</ID>", at);
             if (close == std::string::npos) break;
             any_id = true;
-            if (IsCtrTitle(Trim(xml.substr(at + 4, close - at - 4)))) ours = true;
+            const std::string id = Trim(xml.substr(at + 4, close - at - 4));
+            if (IsCtrTitle(id)) {
+                ours = true;
+                if (file_title.empty()) file_title = id;
+            }
         }
         if (any_id && !ours) continue;
         for (size_t at = 0; (at = xml.find("<Metadata", at)) != std::string::npos; ++at) {
@@ -2074,6 +2125,7 @@ std::vector<PatchInfo> LoadPatches() {
             p.author = get("Author");
             p.note = get("Note");
             p.version = get("PatchVer");
+            p.title = file_title;
             std::string on = get("isEnabled");
             std::transform(on.begin(), on.end(), on.begin(), [](unsigned char c) { return char(std::tolower(c)); });
             p.default_on = on == "true";
@@ -2742,15 +2794,23 @@ void SettingsTab() {
     ImGui::SeparatorText(T("Consola", "Console"));
     if (a.launcher.Get("language") != GameLanguage()) a.launcher.Set("language", GameLanguage());
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
-    ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
-    HelpMarker(T("Los idiomas que trae esta versión del juego (CUSA13795, América): inglés, español latinoamericano, "
-                 "francés y portugués de Brasil. Sus archivos no tienen textos de otros idiomas: el español de España, "
-                 "el alemán, el italiano y los demás vienen solo en las versiones de otras regiones. Se aplica al "
-                 "pulsar Jugar.",
-                 "The languages this build of the game has (CUSA13795, the Americas): English, Latin American "
-                 "Spanish, French and Brazilian Portuguese. Its files hold no text in other languages: Spain's "
-                 "Spanish, German, Italian and the rest come only in other regions' builds. Applied when you press "
-                 "Play."));
+    if (IsEuGame()) {
+        ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguagesEU, DefaultGameLanguage());
+        HelpMarker(T("Los idiomas que trae la versión europea (CUSA14876): inglés, español de España, francés, alemán, "
+                     "italiano y árabe. La lista cambia sola según la versión del juego que elijas. Se aplica al "
+                     "pulsar Jugar.",
+                     "The languages of the European edition (CUSA14876): English, Spain's Spanish, French, German, "
+                     "Italian and Arabic. The list follows the edition of the game you choose. Applied when you "
+                     "press Play."));
+    } else {
+        ChoiceCombo(T("Idioma del juego", "Game language"), "language", kGameLanguages, DefaultGameLanguage());
+        HelpMarker(T("Los idiomas que trae la versión de América (CUSA13795): inglés, español latinoamericano, francés "
+                     "y portugués de Brasil. La lista cambia sola según la versión del juego que elijas (la europea "
+                     "trae español de España, alemán, italiano y árabe). Se aplica al pulsar Jugar.",
+                     "The languages of the Americas edition (CUSA13795): English, Latin American Spanish, French and "
+                     "Brazilian Portuguese. The list follows the edition of the game you choose (the European one has "
+                     "Spain's Spanish, German, Italian and Arabic). Applied when you press Play."));
+    }
 
     ImGui::SeparatorText(T("Ventana y Launcher", "Window and Launcher"));
     LauncherFlag("hide_on_play", T("Ocultar ventana del launcher mientras se juega", "Hide launcher window while playing"), false,
@@ -3241,7 +3301,16 @@ void PatchesTab() {
     if (a.patches.empty()) {
         ImGui::TextColored(kYellow, "%s", T("No hay parches en la carpeta patches.", "No patches in the patches folder."));
     }
+    // Only the patches of the detected edition (the other's are for another executable).
+    const std::string game_title = Narrow(GameTitle());
+    ImGui::TextColored(kGreen, "%s",
+                       Format(T("Tu juego: versión %s (%s). Se muestran sus parches.",
+                                "Your game: %s edition (%s). Its patches are shown."),
+                              RegionOf(game_title), game_title).c_str());
     for (const auto& p : a.patches) {
+        if (!p.title.empty() && p.title != game_title) continue;
+        // The online key patch follows the Online tab's switch (run.py turns it on).
+        if (p.key.find("Online: custom Demonware key") != std::string::npos) continue;
         ImGui::PushID(p.key.c_str());
         bool on;
         if (p.ini_key) {
@@ -3259,7 +3328,9 @@ void PatchesTab() {
         // render_res decides the 1080p Pro patch (Settings > Internal resolution).
         if (needs_neo) on = EffectiveRenderRes() == "1080" && neo;
         ImGui::BeginDisabled(needs_neo);
-        if (ImGui::Checkbox(p.name.c_str(), &on)) {
+        const char* region = RegionOf(p.title);
+        const std::string label = *region ? p.name + " [" + region + "]" : p.name;
+        if (ImGui::Checkbox(label.c_str(), &on)) {
             if (p.ini_key) {
                 a.game.Set(p.ini_key, on ? "1" : "0");
                 SaveGameIni();
