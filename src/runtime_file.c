@@ -69,7 +69,8 @@ static int fullscreen_video(const char *guest) {
  * '|'): a game archive as the game should read it, the archive itself unchanged. Ranges below the
  * archive's size replace those bytes; ranges past it are added after its end (zeros between), and
  * the game sees the archive that much longer. A patch applies only to an archive of the size it was
- * made for. scripts/online_playlist.py makes one (every track in the online race playlist). */
+ * made for. scripts/online_playlist.py makes one (every track in the online race playlist), and
+ * scripts/widescreen.py one per archive of a 21:9 or 32:9 layout; one archive has one patch. */
 typedef struct { uint64_t offset; uint32_t length; const uint8_t *data; } PatchRange;
 typedef struct { char guest[256]; uint64_t size, virtual_size; int count; PatchRange *ranges; } ArchivePatch;
 typedef struct { int used, host, dirty, save_logged, video; Listing *dir; size_t position; char path[512]; char *commit, *temp; const ArchivePatch *patch; } File;
@@ -286,7 +287,7 @@ static File *get(int fd) {
 }
 
 /* --- archive patches (see ArchivePatch) ----------------------------------------------------- */
-#define MAX_ARCHIVE_PATCHES 8
+#define MAX_ARCHIVE_PATCHES 32 /* the widescreen layouts patch 13 archives (scripts/widescreen.py) */
 static ArchivePatch archive_patches[MAX_ARCHIVE_PATCHES];
 static int archive_patch_count;
 static pthread_once_t archive_patches_once=PTHREAD_ONCE_INIT;
@@ -303,7 +304,7 @@ static int parse_archive_patch(const uint8_t *b,size_t len,ArchivePatch *out) {
     if (n==0 || n>=sizeof(out->guest) || at+n+4>len) return 0;
     memcpy(out->guest,b+at,n); out->guest[n]=0; at+=n;
     uint32_t count=le32(b+at); at+=4;
-    if (count==0 || count>64) return 0;
+    if (count==0 || count>4096) return 0; /* a layout replaces up to 152 entries of an archive: 2 ranges each */
     out->ranges=calloc(count,sizeof(PatchRange));
     if (!out->ranges) return 0;
     out->virtual_size=out->size;

@@ -51,19 +51,43 @@ def read(path):
 def write_entry_patch(target, archive, guest, index, payload):
     """A patch that replaces entry index of an IGA v13 archive with payload, stored uncompressed
     after the end of the archive (on a sector boundary)."""
+    write_entries_patch(target, archive, guest, {index: payload})
+
+
+def write_entries_patch(target, archive, guest, entries, base=None):
+    """A patch that replaces entries {index: payload} of an IGA v13 archive, each stored
+    uncompressed after the end of the archive (on sector boundaries). base, another patch for the
+    same archive (path), is kept in it: its ranges first, these entries after its data. The
+    runtime takes one patch per archive, so two features changing one archive share a file."""
     size = Path(archive).stat().st_size
+    ranges, end = [], size
+    if base is not None:
+        base_size, base_guest, ranges = read(base)
+        if base_size != size or base_guest.lower() != guest.lower():
+            raise ValueError(f'{base} was made for another archive')
+        end = max([size] + [o + len(d) for o, d in ranges])
     with open(archive, 'rb') as f:
         header = f.read(0x38)
         count, = struct.unpack_from('<I', header, 0xc)
-        if index >= count:
-            raise ValueError('no such entry')
+        records = {}
+        for index in entries:
+            if not 0 <= index < count:
+                raise ValueError('no such entry')
+            f.seek(0x38 + 4 * count + 16 * index)
+            records[index] = struct.unpack('<4I', f.read(16))
+    taken = {o for o, d in ranges if len(d) == 16}
+    for index in sorted(entries):
         record_at = 0x38 + 4 * count + 16 * index
-        f.seek(record_at)
-        _offset, extra, _length, _mode = struct.unpack('<4I', f.read(16))
-    position = (size + SECTOR - 1) // SECTOR * SECTOR
-    record = struct.pack('<4I', position & 0xFFFFFFFF, (extra & 0xFFFFFF00) | (position >> 32),
-                         len(payload), 0xFFFFFFFF)
-    write(target, archive, guest, [(record_at, record), (position, payload)])
+        if record_at in taken:
+            raise ValueError(f'entry {index} is already replaced by {base}')
+        payload = entries[index]
+        position = (end + SECTOR - 1) // SECTOR * SECTOR
+        _offset, extra, _length, _mode = records[index]
+        record = struct.pack('<4I', position & 0xFFFFFFFF, (extra & 0xFFFFFF00) | (position >> 32),
+                             len(payload), 0xFFFFFFFF)
+        ranges += [(record_at, record), (position, payload)]
+        end = position + len(payload)
+    write(target, archive, guest, ranges)
 
 
 def view(archive, patch, offset, length):

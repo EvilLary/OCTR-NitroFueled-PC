@@ -431,7 +431,7 @@ def external_selection(found, config, ini=None):
 def compile_external(selected, segments, elf=None):
     """Writes of the selected patches; a patch with unsupported lines is skipped whole. elf (the
     eboot.elf bytes) is needed for lines with a Signature."""
-    writes=[]
+    writes,claims=[],[]
     for key,_,meta in selected:
         try:
             ours=[]
@@ -449,6 +449,14 @@ def compile_external(selected, segments, elf=None):
         except ValueError as error:
             print(f'Patches: skipped {key}: {error}',file=sys.stderr)
             continue
+        # Two patches writing the same bytes: the later one's bytes win, and neither works as
+        # made (a widescreen layout and a patch of the same code, scripts/widescreen.py).
+        for offset,data in ours:
+            for start,end,other in claims:
+                if other!=key and offset<end and start<offset+len(data):
+                    print(f'Patches: {key} and {other} both write {offset+EBOOT_BASE:#010x}: the later one wins',file=sys.stderr)
+                    break
+        claims+=[(offset,offset+len(data),key) for offset,data in ours]
         writes+=ours
         print(f'Patches: external {key} ({len(ours)} writes)')
     return writes
