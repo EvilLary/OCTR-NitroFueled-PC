@@ -332,23 +332,71 @@ static int from_server(const struct sockaddr_in *from, const struct sockaddr_in 
     return from->sin_addr.s_addr == server->sin_addr.s_addr && from->sin_port == server->sin_port;
 }
 
-static void tunnel_keepalive(VSocket *vs, const struct sockaddr_in *server) {
-    if (tun_keepalive_due(now_ms()))
-        sendto(vs->s, TUN_KEEPALIVE, TUN_KEEPALIVE_LEN, 0, (const struct sockaddr *)server, sizeof(*server));
+static struct sockaddr_in addr_of(uint32_t ip, uint16_t port) {
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = ip;
+    a.sin_port = htons(port);
+    return a;
 }
 
-/* After the game's own send to a peer: a wrapped copy through the server while the direct
- * path is not proven both ways. */
+/* Keeps this socket's paths open: to the server (asking for a pass for the regional relays
+ * unless BB_ONLINE_RELAYS=0) and, registered with that pass, to every relay. */
+static void tunnel_keepalive(VSocket *vs, const struct sockaddr_in *server) {
+    static int relays_wanted = -1;
+    if (relays_wanted < 0) {
+        const char *v = getenv("BB_ONLINE_RELAYS");
+        relays_wanted = !(v && strcmp(v, "0") == 0);
+    }
+    const uint64_t now = now_ms();
+    if (tun_keepalive_due(now)) {
+        uint8_t request[TUN_REQUEST_LEN];
+        const size_t n = relays_wanted ? tun_pass_request(request, sizeof(request), now) : 0;
+        if (n) sendto(vs->s, (const char *)request, (int)n, 0, (const struct sockaddr *)server, sizeof(*server));
+        else sendto(vs->s, TUN_KEEPALIVE, TUN_KEEPALIVE_LEN, 0, (const struct sockaddr *)server, sizeof(*server));
+    }
+    const int relays = tun_relay_count();
+    for (int i = 0; i < relays; i++) {
+        uint8_t reg[6 + TUN_PASS_LEN + 4];
+        uint32_t ip;
+        uint16_t port;
+        const size_t n = tun_relay_register(i, now, reg, sizeof(reg), &ip, &port);
+        if (!n) continue;
+        const struct sockaddr_in to = addr_of(ip, port);
+        sendto(vs->s, (const char *)reg, (int)n, 0, (const struct sockaddr *)&to, sizeof(to));
+    }
+}
+
+/* After the game's own send to a peer: a wrapped copy through the nearest relay and/or the
+ * server while the direct path is not proven both ways. */
 static void tunnel_copy(VSocket *vs, const void *msg, size_t len, const struct sockaddr_in *to) {
     struct sockaddr_in server;
     if (!vs->tunnel || !tunnel_server(&server)) return;
     tunnel_keepalive(vs, &server);
     if (!tun_candidate(to->sin_addr.s_addr, server.sin_addr.s_addr) || len > 2048) return;
+    if (tun_relay_index(to->sin_addr.s_addr, ntohs(to->sin_port)) >= 0) return;
     uint8_t flags;
-    if (!tun_on_send(to->sin_addr.s_addr, ntohs(to->sin_port), now_ms(), &flags)) return;
+    int relay = -1;
+    const int route = tun_on_send(to->sin_addr.s_addr, ntohs(to->sin_port), now_ms(), &flags, &relay);
+    if (!route) return;
     uint8_t wrapped[2048 + TUN_HEADER_LEN];
     size_t n = tun_wrap(wrapped, sizeof(wrapped), flags, to->sin_addr.s_addr, ntohs(to->sin_port), msg, len);
-    if (n) sendto(vs->s, (const char *)wrapped, (int)n, 0, (const struct sockaddr *)&server, sizeof(server));
+    if (!n) return;
+    if (route & TUN_VIA_SERVER)
+        sendto(vs->s, (const char *)wrapped, (int)n, 0, (const struct sockaddr *)&server, sizeof(server));
+    uint32_t ip;
+    uint16_t port;
+    if ((route & TUN_VIA_RELAY) && tun_relay_addr(relay, &ip, &port)) {
+        static int traced = -2;
+        if (relay != traced) {
+            traced = relay;
+            runtime_net_trace("Tunnel: through relay %s (%u ms) for peers without a direct path",
+                              tun_relay_name(relay), tun_relay_ping(relay));
+        }
+        const struct sockaddr_in via = addr_of(ip, port);
+        sendto(vs->s, (const char *)wrapped, (int)n, 0, (const struct sockaddr *)&via, sizeof(via));
+    }
 }
 
 int32_t runtime_net_bind(int s, const OrbisNetSockaddr *addr, uint32_t addrlen) {
@@ -563,8 +611,11 @@ int32_t runtime_net_recvfrom(int s, void *buf, size_t len, int flags, OrbisNetSo
     uint8_t wrapped[2048 + TUN_HEADER_LEN];
     char *into = tunnel ? (char *)wrapped : (char *)buf;
     const int cap = tunnel ? (int)sizeof(wrapped) : (int)len;
-    int ret = recvfrom(vs->s, into, cap, tunnel ? (win_flags & ~MSG_PEEK) : win_flags,
-                       (struct sockaddr *)&sin, &sin_len);
+    int ret;
+next_datagram: /* after a tunnel control packet, which is not the game's */
+    sin_len = sizeof(sin);
+    ret = recvfrom(vs->s, into, cap, tunnel ? (win_flags & ~MSG_PEEK) : win_flags,
+                   (struct sockaddr *)&sin, &sin_len);
     if (ret < 0) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) {
@@ -580,15 +631,30 @@ int32_t runtime_net_recvfrom(int s, void *buf, size_t len, int flags, OrbisNetSo
         uint8_t tflags;
         uint32_t ip;
         uint16_t port;
+        int relay = -1;
         if (from_server(&sin, &server)) {
+            /* The server's pass and relay list. */
+            if (tun_on_offer(wrapped, (size_t)ret, now_ms())) goto next_datagram;
             /* The server's own NAT replies (0x15, 0x1F, 0x0B...) go to the game unchanged. */
             if (tun_unwrap(wrapped, (size_t)ret, &tflags, &ip, &port)) {
-                tun_on_tunnelled(ip, port, tflags, now_ms());
+                tun_on_tunnelled(ip, port, tflags, 0, now_ms());
                 sin.sin_addr.s_addr = ip;
                 sin.sin_port = htons(port);
                 payload = wrapped + TUN_HEADER_LEN;
                 ret -= TUN_HEADER_LEN;
             }
+        } else if ((relay = tun_relay_index(sin.sin_addr.s_addr, ntohs(sin.sin_port))) >= 0) {
+            /* A relay: its registration replies, and peers' tunnelled packets. Nothing else
+             * from it is the game's. */
+            if (!tun_unwrap(wrapped, (size_t)ret, &tflags, &ip, &port)) {
+                tun_on_register_reply(relay, wrapped, (size_t)ret, now_ms());
+                goto next_datagram;
+            }
+            tun_on_tunnelled(ip, port, tflags, 1, now_ms());
+            sin.sin_addr.s_addr = ip;
+            sin.sin_port = htons(port);
+            payload = wrapped + TUN_HEADER_LEN;
+            ret -= TUN_HEADER_LEN;
         } else {
             tun_on_direct(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms());
         }
