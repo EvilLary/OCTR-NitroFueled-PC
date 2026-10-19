@@ -19,7 +19,7 @@ inline bool IsFsr4(int upscaler) {
 }
 enum Preset : int { NativeAA = 0, Quality, Balanced, Performance, UltraPerformance, PresetCount };
 enum DebugView : int { DebugNone = 0, DebugReactive = 1, DebugMotion = 2, DebugViewCount };
-enum class MenuLanguage { English, Russian };
+enum class MenuLanguage { English, Russian, Spanish };
 
 /// Game effects switched by the community patches at start (patches.py EFFECTS): ini key,
 /// menu label, default (the game's own behaviour).
@@ -187,6 +187,10 @@ Values& Get();
 std::mutex& PortsMutex();
 /// Localized overlay text; the Language selector itself stays in English.
 const char* MenuText(const char* english, const char* russian);
+/// v0.4: the Spanish of an English menu text (bbport_menu_es.cpp); the English one if missing.
+const char* Spanish(const char* english);
+/// An English-only label in the menu's language (Spanish when chosen, else English).
+inline const char* Label(const char* english) { return MenuText(english, english); }
 
 /// Reads the file, then the environment overrides. Called once at start.
 void Load();

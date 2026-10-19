@@ -34,7 +34,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     } else if (key == "menu_language") {
         if (value == "en") v.menu_language = MenuLanguage::English;
         else if (value == "ru") v.menu_language = MenuLanguage::Russian;
-        else std::printf("Settings: unknown menu_language '%s' (expected en or ru)\n", value.c_str());
+        else if (value == "es") v.menu_language = MenuLanguage::Spanish;
+        else std::printf("Settings: unknown menu_language '%s' (expected en, ru or es)\n", value.c_str());
     } else if (key == "upscaler") {
         for (int u = 0; u < UpscalerCount; ++u) {
             if (value == UpscalerName(u)) {
@@ -156,7 +157,11 @@ Values& Get() {
 }
 
 const char* MenuText(const char* english, const char* russian) {
-    return Get().menu_language == MenuLanguage::Russian ? russian : english;
+    switch (Get().menu_language.load()) {
+    case MenuLanguage::Russian: return russian;
+    case MenuLanguage::Spanish: return Spanish(english);
+    default: return english;
+    }
 }
 
 void Load() {
@@ -176,9 +181,10 @@ void Load() {
                 }
             }
         }
-        v.menu_language = lang && (lang[0] == 'r' || lang[0] == 'R') && (lang[1] == 'u' || lang[1] == 'U')
-                              ? MenuLanguage::Russian
-                              : MenuLanguage::English;
+        auto is = [&](char a, char b) {
+            return lang && (lang[0] == a || lang[0] == a - 32) && (lang[1] == b || lang[1] == b - 32);
+        };
+        v.menu_language = is('r', 'u') ? MenuLanguage::Russian : is('e', 's') ? MenuLanguage::Spanish : MenuLanguage::English;
     }
     if (FILE* file = std::fopen(Path(), "r")) {
         char line[256];
@@ -193,6 +199,13 @@ void Load() {
         }
         std::fclose(file);
         std::printf("Settings: %s\n", Path());
+    }
+    // v0.4: the launcher's language (BB_MENU_LANGUAGE) wins over the saved one: the launcher is
+    // where the player picks it.
+    if (const char* lang = std::getenv("BB_MENU_LANGUAGE"); lang && *lang) {
+        if (!std::strncmp(lang, "es", 2)) v.menu_language = MenuLanguage::Spanish;
+        else if (!std::strncmp(lang, "ru", 2)) v.menu_language = MenuLanguage::Russian;
+        else if (!std::strncmp(lang, "en", 2)) v.menu_language = MenuLanguage::English;
     }
     // SacredFire: bbport's temporal upscalers and object motion vectors read the scene of the game
     // bbport was built for (its render targets, constants and vertex streams), not this one; they
@@ -343,7 +356,9 @@ void Save() {
             put(("port." + std::to_string(p + 1)).c_str(), std::string(v.ports[size_t(p)].data()));
         }
     }
-    put("menu_language", v.menu_language == MenuLanguage::Russian ? "ru" : "en");
+    put("menu_language", v.menu_language == MenuLanguage::Russian   ? "ru"
+                         : v.menu_language == MenuLanguage::Spanish ? "es"
+                                                                    : "en");
     put("upscaler", UpscalerName(v.upscaler));
     put("preset", std::to_string(v.preset.load()));
     put("sharpen", flag(v.sharpen));
