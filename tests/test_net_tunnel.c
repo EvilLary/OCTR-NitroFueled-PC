@@ -206,10 +206,32 @@ static void relay_routes(void) {
     CHECK(tun_on_send(old, 3074, 2000 + TUN_RELAY_TRIAL_MS + 1, &flags, &relay_slot) == TUN_VIA_SERVER);
 }
 
+static void forced_relay(void) {
+    tun_reset();
+    uint8_t buf[512];
+    uint32_t ip;
+    uint16_t port;
+    tun_pass_request(buf, sizeof(buf), 0);
+    tun_on_offer(buf, offer(buf), 20); /* the server: 20 ms, better than both relays */
+    for (int i = 0; i < 2; i++) {
+        tun_relay_register(i, 100, buf, sizeof(buf), &ip, &port);
+        relay_reply(buf, 0, 100);
+        tun_on_register_reply(i, buf, 11, 180);
+    }
+    CHECK(tun_best_relay(200) == -1);
+    tun_force_relay("eu");
+    CHECK(tun_best_relay(200) == 1);
+    tun_force_relay("nowhere");
+    CHECK(tun_best_relay(200) == -1);
+    tun_force_relay(NULL);
+    CHECK(tun_best_relay(200) == -1);
+}
+
 int main(void) {
     candidates();
     relay_offer_and_registration();
     relay_routes();
+    forced_relay();
     wrap_format();
     both_directions_work();
     one_way_path_keeps_the_tunnel();

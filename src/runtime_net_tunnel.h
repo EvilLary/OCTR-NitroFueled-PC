@@ -69,6 +69,9 @@ int tun_relay_addr(int i, uint32_t *ip, uint16_t *port);
 size_t tun_relay_register(int i, uint64_t now_ms, uint8_t *out, size_t cap, uint32_t *ip, uint16_t *port);
 /* A packet from relay i: 1 for a registration reply (RYURG1), taken. */
 int tun_on_register_reply(int i, const uint8_t *in, size_t len, uint64_t now_ms);
+/* Tunnelled copies through this relay (by name) whenever it answers, whatever the pings: a
+ * player's or a test's choice (BB_ONLINE_RELAYS=<name>). NULL or "" goes back to the pings. */
+void tun_force_relay(const char *name);
 /* The relay tunnelled copies go through now: its index, or -1 for the server. */
 int tun_best_relay(uint64_t now_ms);
 /* For the log: relay i's name and ping (0 when it has not answered). */

@@ -41,7 +41,9 @@ static int relay_count;
 static uint8_t pass[TUN_PASS_LEN];
 static int have_pass;
 static uint64_t request_at;       /* the pending pass request, for the server's ping */
+static int request_pending;
 static uint32_t server_ping;
+static char forced_relay[16];
 static atomic_flag lock = ATOMIC_FLAG_INIT;
 
 static void take(void) { while (atomic_flag_test_and_set_explicit(&lock, memory_order_acquire)) {} }
@@ -55,7 +57,9 @@ void tun_reset(void) {
     relay_count = 0;
     have_pass = 0;
     request_at = 0;
+    request_pending = 0;
     server_ping = 0;
+    memset(forced_relay, 0, sizeof(forced_relay));
     give();
 }
 
@@ -104,9 +108,24 @@ static int direct_fresh(const TunPeer *p, uint64_t now) {
     return p->last_direct && now - p->last_direct < TUN_DIRECT_FRESH_MS;
 }
 
-/* The relay with the best ping that answers, when it beats the server's. Holds the lock. */
+void tun_force_relay(const char *name) {
+    take();
+    memset(forced_relay, 0, sizeof(forced_relay));
+    if (name) strncpy(forced_relay, name, sizeof(forced_relay) - 1);
+    give();
+}
+
+/* The relay with the best ping that answers, when it beats the server's (or the forced one
+ * while it answers). Holds the lock. */
 static int best_relay(uint64_t now) {
     int best = -1;
+    if (forced_relay[0]) {
+        for (int i = 0; i < relay_count; i++) {
+            const TunRelay *r = &relays[i];
+            if (strcmp(r->name, forced_relay) == 0 && r->last_ack && now - r->last_ack < TUN_RELAY_FRESH_MS) return i;
+        }
+        return -1;
+    }
     for (int i = 0; i < relay_count; i++) {
         const TunRelay *r = &relays[i];
         if (!r->ping || !r->last_ack || now - r->last_ack >= TUN_RELAY_FRESH_MS) continue;
@@ -179,6 +198,7 @@ size_t tun_pass_request(uint8_t *out, size_t cap, uint64_t now_ms) {
     out[TUN_KEEPALIVE_LEN] = 2;
     take();
     request_at = now_ms;
+    request_pending = 1;
     give();
     return TUN_REQUEST_LEN;
 }
@@ -202,9 +222,9 @@ int tun_on_offer(const uint8_t *in, size_t len, uint64_t now_ms) {
     take();
     memcpy(pass, in + 6, TUN_PASS_LEN);
     have_pass = 1;
-    if (request_at) {
+    if (request_pending) {
         server_ping = smooth(server_ping, now_ms - request_at);
-        request_at = 0;
+        request_pending = 0;
     }
     /* Relays that stay keep what they measured. */
     for (int i = 0; i < count; i++) {

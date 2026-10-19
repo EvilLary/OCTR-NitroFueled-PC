@@ -348,6 +348,10 @@ static void tunnel_keepalive(VSocket *vs, const struct sockaddr_in *server) {
     if (relays_wanted < 0) {
         const char *v = getenv("BB_ONLINE_RELAYS");
         relays_wanted = !(v && strcmp(v, "0") == 0);
+        if (relays_wanted && v && *v && strcmp(v, "1") != 0) {
+            tun_force_relay(v);
+            runtime_net_trace("Tunnel: relay %s chosen (BB_ONLINE_RELAYS)", v);
+        }
     }
     const uint64_t now = now_ms();
     if (tun_keepalive_due(now)) {
@@ -656,6 +660,15 @@ next_datagram: /* after a tunnel control packet, which is not the game's */
             payload = wrapped + TUN_HEADER_LEN;
             ret -= TUN_HEADER_LEN;
         } else {
+            /* BB_ONLINE_DIRECT=0 (tests): peers' direct packets are dropped, so the game's
+             * traffic with them has to come through the tunnel. */
+            static int direct_off = -1;
+            if (direct_off < 0) {
+                const char *v = getenv("BB_ONLINE_DIRECT");
+                direct_off = v && strcmp(v, "0") == 0;
+                if (direct_off) runtime_net_trace("Tunnel: direct packets from peers ignored (BB_ONLINE_DIRECT=0)");
+            }
+            if (direct_off && tun_candidate(sin.sin_addr.s_addr, server.sin_addr.s_addr)) goto next_datagram;
             tun_on_direct(sin.sin_addr.s_addr, ntohs(sin.sin_port), now_ms());
         }
         if ((win_flags & MSG_PEEK) && ret <= (int)sizeof(peeked.data)) {
