@@ -430,15 +430,14 @@ def main():
         else:
             env.pop('BB_SHADER_RECIPE', None)
             env.pop('BB_GCN_SHADERS', None)
-        # Every race track in the online playlist, at the same weight (scripts/online_playlist.py):
-        # the game reads it through an archive patch; the archives stay as they are.
-        # bbport.ini online_playlist=0 or BB_ONLINE_PLAYLIST=0 keeps the game's own playlist.
+        # Every race track in the online playlist, at the same weight (scripts/online_playlist.py),
+        # always: public rooms draw from the same pool for everyone. The game reads it through an
+        # archive patch; the archives stay as they are. When it cannot be built, the game's own.
         env.pop('BB_ARCHIVE_PATCHES', None)
-        if env.get('BB_ONLINE_PLAYLIST', '1') != '0' and not ini_has(config, 'online_playlist=0'):
-            run_python('scripts/online_playlist.py', game, '--out', out)
-            playlist_patch = out / 'online_playlist.bbpatch'
-            if playlist_patch.is_file():
-                env['BB_ARCHIVE_PATCHES'] = str(playlist_patch)
+        run_python('scripts/online_playlist.py', game, '--out', out)
+        playlist_patch = out / 'online_playlist.bbpatch'
+        if playlist_patch.is_file():
+            env['BB_ARCHIVE_PATCHES'] = str(playlist_patch)
         env.setdefault('BB_NEO', '0')
         apply_render_res(env, config)
         say(f'PS4 Pro mode: {env["BB_NEO"]} (BB_NEO=1 turns it on)')

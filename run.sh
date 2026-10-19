@@ -97,15 +97,13 @@ if [[ ${BB_SHADER_RECIPE:-} != 0 && -f $recipe ]]; then
 else
     unset BB_SHADER_RECIPE BB_GCN_SHADERS
 fi
-# Every race track in the online playlist, at the same weight (as run.py): the game reads it
-# through an archive patch. bbport.ini online_playlist=0 or BB_ONLINE_PLAYLIST=0 keeps its own.
+# Every race track in the online playlist, at the same weight, always (as run.py): the game reads
+# it through an archive patch. When it cannot be built, the game keeps its own.
 unset BB_ARCHIVE_PATCHES
-if [[ ${BB_ONLINE_PLAYLIST:-1} != 0 ]] && ! grep -qx 'online_playlist=0' "$BB_CONFIG" 2>/dev/null; then
-    "$PYTHON" scripts/online_playlist.py "$game" --out "$out"
-    if [[ -f $out/online_playlist.bbpatch ]]; then
-        BB_ARCHIVE_PATCHES=$(realpath "$out")/online_playlist.bbpatch
-        export BB_ARCHIVE_PATCHES
-    fi
+"$PYTHON" scripts/online_playlist.py "$game" --out "$out"
+if [[ -f $out/online_playlist.bbpatch ]]; then
+    BB_ARCHIVE_PATCHES=$(realpath "$out")/online_playlist.bbpatch
+    export BB_ARCHIVE_PATCHES
 fi
 # The game runs at its own 30 FPS against a 60 Hz vblank unless the 60 FPS patch is on. Patches
 # come from patches/CrashTeamRacing.xml (community patches by illusion and TroyWarez, from
