@@ -1023,8 +1023,14 @@ void Menu() {
     // second press confirms; the window thread then closes like the window's own close button.
     static bool quit_armed;
     ImGui::SameLine();
-    if (ImGui::Button(quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
-                                 : BbSettings::MenuText("Quit game", "Выйти из игры"))) {
+
+    const char *quit_button_text = quit_armed ? BbSettings::MenuText("Press again to quit", "Нажмите ещё раз для выхода")
+                                              : BbSettings::MenuText("Quit game", "Выйти из игры");
+
+    // keep a stable ID so changing the label preserves gamepad focus
+    const std::string quit_button_text_with_id = std::string(quit_button_text) + "###quit_game";
+
+    if (ImGui::Button(quit_button_text_with_id.c_str())) {
         if (quit_armed) {
             SDL_Event quit{};
             quit.type = SDL_EVENT_QUIT;
