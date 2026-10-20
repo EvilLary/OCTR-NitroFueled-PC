@@ -968,7 +968,7 @@ class LauncherWindow(Adw.ApplicationWindow):
         screen.add(self.render_res_row)
         self.layout_row = combo_row(
             tr("Aspect ratio"),
-            tr("21:9 and 32:9 correct the menus, backgrounds and HUD for that screen. Offline only, with the 1.21 "
+            tr("21:9 and 32:9 correct the menus, backgrounds and HUD for that screen. Online or offline, with the 1.21 "
                "update, USA or Europe (otherwise the game starts at 16:9); no FSR. The internal resolution picks the variant."),
             WIDESCREEN_LAYOUTS, self.ini.get("widescreen_layout", "off"))
         screen.add(self.layout_row)

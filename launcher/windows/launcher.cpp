@@ -2676,9 +2676,9 @@ void WidescreenSettings() {
     } else {
         if (GameChoiceCombo(label, "widescreen_output", super, "5120x1440", 16.0f)) SaveGameIni();
     }
-    ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. Solo sin conexión y con la actualización 1.21, USA o Europa "
+    ImGui::TextColored(kGrey, "%s", T("Menús, fondos y HUD centrado corregidos. En línea o sin conexión con la actualización 1.21, USA o Europa "
         "(si no, el juego arranca en 16:9). Sin FSR ni DLSS; la resolución interna elige la variante.",
-        "Corrected menus, backgrounds and a centered HUD. Offline only, with the 1.21 update, USA or Europe "
+        "Corrected menus, backgrounds and a centered HUD. Online or offline, with the 1.21 update, USA or Europe "
         "(otherwise the game starts at 16:9). No FSR or DLSS; the internal resolution picks the variant."));
 }
 
