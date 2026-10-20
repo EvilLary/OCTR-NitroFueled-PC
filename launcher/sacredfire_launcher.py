@@ -119,6 +119,7 @@ INI_PATCHES = {"CrashTeamRacing.xml/60 FPS Unlock": "patch_60fps",
                "CrashTeamRacing.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p",
                "CrashTeamRacingUnlockAll.xml/Unlock Everything": "patch_unlock_all",
                # The European edition's files: the same switches (scripts/patches.py BUNDLED_FILES).
+               "CrashTeamRacingUnlockAllEU.xml/Unlock Everything": "patch_unlock_all",
                "CrashTeamRacingEU.xml/60 FPS Unlock": "patch_60fps",
                "CrashTeamRacingEU.xml/Disable Motion Blur": "patch_no_motion_blur",
                "CrashTeamRacingEU.xml/Resolution Patch (1080p for PS4 Pro)": "patch_pro_1080p"}

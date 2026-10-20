@@ -38,6 +38,7 @@ GAME_PATCH_KEYS={'patch_60fps':'CrashTeamRacing.xml/60 FPS Unlock',
                  'patch_online_key':'CrashTeamRacingOnline.xml/Online: custom Demonware key'}
 # The bundled files of other editions: their patches are selected under the USA files' keys.
 BUNDLED_FILES={'CrashTeamRacingEU.xml':'CrashTeamRacing.xml',
+               'CrashTeamRacingUnlockAllEU.xml':'CrashTeamRacingUnlockAll.xml',
                'CrashTeamRacingOnlineEU.xml':'CrashTeamRacingOnline.xml'}
 
 
