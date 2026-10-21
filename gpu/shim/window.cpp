@@ -10,6 +10,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
+#include "video_core/renderer_vulkan/vk_platform.h"
 #include "bbport_overlay.h"
 #include "bbport_settings.h"
 
@@ -106,6 +107,11 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
+    if (!window && std::strstr(SDL_GetError(), "Vulkan")) {
+        // bbport: SDL found no usable Vulkan (no driver, or a loader without surfaces).
+        LOG_CRITICAL(Frontend, "Failed to create window: {}", SDL_GetError());
+        Vulkan::StopUnsupportedVulkan("this PC", 0);
+    }
     ASSERT_MSG(window, "Failed to create window: {}", SDL_GetError());
 
     const char* driver = SDL_GetCurrentVideoDriver();
