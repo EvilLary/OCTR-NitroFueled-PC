@@ -910,11 +910,14 @@ def install_game_icon(game_dir):
 class LauncherWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title=f"{TITLE} {port_version()}".rstrip())
-        if install_game_icon(self.settings["game_dir"] if hasattr(self, "settings") else load_settings()["game_dir"]):
+        self.settings = load_settings()
+        game_dir = self.settings["game_dir"];
+        if install_game_icon(game_dir):
             self.set_icon_name(APP_ID)
+        if game_dir:
+            set_game_title(game_dir)
         self.set_default_size(980, 760)
         self.set_size_request(360, 420)
-        self.settings = load_settings()
         set_language(self.settings.get("ui_language", ""))
         self.ini, self.ini_lines = load_ini()
         self.process = None
